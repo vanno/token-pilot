@@ -1,0 +1,152 @@
+#!/usr/bin/env python3
+"""token-pilot — audit des sources de consommation fixe d'un projet.
+
+Mesure ce qui est chargé à chaque session : CLAUDE.md (projet, utilisateur, imports),
+serveurs MCP, skills/agents/commands du projet, réglages de modèle et d'effort.
+Usage : tp-audit [dossier_projet]
+"""
+import json
+import os
+import re
+import sys
+
+root = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else os.getcwd())
+home = os.path.expanduser("~")
+
+
+def tokens(chars):
+    return int(chars / 3.8)  # approximation tokens pour du texte FR/EN mêlé
+
+
+def read(path):
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            return fh.read()
+    except OSError:
+        return None
+
+
+def load_json(path):
+    txt = read(path)
+    if txt is None:
+        return None
+    try:
+        return json.loads(txt)
+    except ValueError:
+        return {"_invalid": True}
+
+
+print(f"# Audit token-pilot — {root}\n")
+
+# 1. Fichiers mémoire
+print("## Fichiers CLAUDE.md chargés à chaque session")
+mem_files = [
+    os.path.join(home, ".claude", "CLAUDE.md"),
+    os.path.join(root, "CLAUDE.md"),
+    os.path.join(root, ".claude", "CLAUDE.md"),
+    os.path.join(root, "CLAUDE.local.md"),
+]
+total_mem = 0
+seen = set()
+
+
+def report_mem(path, depth=0):
+    global total_mem
+    real = os.path.realpath(path)
+    if real in seen or depth > 4:
+        return
+    seen.add(real)
+    txt = read(path)
+    if txt is None:
+        return
+    lines = txt.count("\n") + 1
+    t = tokens(len(txt))
+    total_mem += t
+    flag = "  ⚠ plus de 200 lignes" if lines > 200 else ""
+    print(f"{'  ' * depth}- {os.path.relpath(path, root) if path.startswith(root) else path} : {lines} lignes, ~{t} tokens{flag}")
+    for imp in re.findall(r"(?m)(?:^|\s)@([~./\w][^\s`)]*)", txt):
+        p = os.path.expanduser(imp) if imp.startswith("~") else os.path.join(os.path.dirname(path), imp)
+        if os.path.isfile(p):
+            report_mem(p, depth + 1)
+
+
+for f in mem_files:
+    report_mem(f)
+nested = []
+for dirpath, dirnames, filenames in os.walk(root):
+    dirnames[:] = [d for d in dirnames if d not in {".git", "node_modules", ".next", "dist", "build", ".vercel", ".turbo", "vendor", ".venv"}]
+    if dirpath != root and "CLAUDE.md" in filenames:
+        nested.append(os.path.relpath(os.path.join(dirpath, "CLAUDE.md"), root))
+print(f"Total chargé d'office : ~{total_mem} tokens")
+if nested:
+    print(f"CLAUDE.md de sous-dossiers (chargés seulement quand on y travaille) : {', '.join(nested[:10])}")
+print()
+
+# 2. MCP
+print("## Serveurs MCP")
+servers = {}
+pj = load_json(os.path.join(root, ".mcp.json")) or {}
+for name in (pj.get("mcpServers") or {}):
+    servers[name] = "projet (.mcp.json)"
+cj = load_json(os.path.join(home, ".claude.json")) or {}
+for name in (cj.get("mcpServers") or {}):
+    servers.setdefault(name, "utilisateur (~/.claude.json)")
+proj_cfg = (cj.get("projects") or {}).get(root) or {}
+for name in (proj_cfg.get("mcpServers") or {}):
+    servers.setdefault(name, "local à ce projet")
+disabled = set(proj_cfg.get("disabledMcpServers") or []) | set(proj_cfg.get("disabledMcpjsonServers") or [])
+if servers:
+    for n, scope in sorted(servers.items()):
+        state = " (désactivé ici)" if n in disabled else ""
+        print(f"- {n} — {scope}{state}")
+else:
+    print("- aucun serveur MCP local détecté (les connecteurs claude.ai ne sont pas visibles ici)")
+print()
+
+# 3. Réglages
+print("## Réglages de modèle et d'effort")
+for label, path in [
+    ("utilisateur", os.path.join(home, ".claude", "settings.json")),
+    ("projet", os.path.join(root, ".claude", "settings.json")),
+    ("local", os.path.join(root, ".claude", "settings.local.json")),
+]:
+    s = load_json(path)
+    if not s:
+        continue
+    if s.get("_invalid"):
+        print(f"- {label} : JSON invalide ({path})")
+        continue
+    print(f"- {label} : model={s.get('model', '—')}, effortLevel={s.get('effortLevel', '—')}, statusLine={'oui' if s.get('statusLine') else 'non'}")
+env_model = os.environ.get("ANTHROPIC_MODEL")
+if env_model:
+    print(f"- variable ANTHROPIC_MODEL={env_model} (prioritaire sur settings.json)")
+if os.environ.get("CLAUDE_CODE_SUBAGENT_MODEL"):
+    print(f"- CLAUDE_CODE_SUBAGENT_MODEL={os.environ['CLAUDE_CODE_SUBAGENT_MODEL']} (attention : peut écraser le routage des sous-agents)")
+print()
+
+# 4. Skills / agents / commandes du projet
+print("## Skills, agents et commandes du projet")
+for sub in ("skills", "agents", "commands"):
+    d = os.path.join(root, ".claude", sub)
+    if os.path.isdir(d):
+        items = sorted(os.listdir(d))
+        print(f"- .claude/{sub} : {len(items)} ({', '.join(items[:12])})")
+print()
+
+# 5. Fichiers lourds non ignorés que Claude risque de lire
+print("## Fichiers volumineux à surveiller (> 300 Ko, hors dossiers ignorés)")
+big = []
+for dirpath, dirnames, filenames in os.walk(root):
+    dirnames[:] = [d for d in dirnames if d not in {".git", "node_modules", ".next", "dist", "build", ".vercel", ".turbo", "vendor", ".venv", "coverage"}]
+    for fn in filenames:
+        p = os.path.join(dirpath, fn)
+        try:
+            sz = os.path.getsize(p)
+        except OSError:
+            continue
+        if sz > 300_000 and not fn.endswith((".png", ".jpg", ".jpeg", ".webp", ".gif", ".mp4", ".mov", ".woff", ".woff2", ".ttf", ".ico", ".pdf", ".zip")):
+            big.append((sz, os.path.relpath(p, root)))
+for sz, p in sorted(big, reverse=True)[:10]:
+    print(f"- {p} : {sz // 1024} Ko")
+if not big:
+    print("- aucun")

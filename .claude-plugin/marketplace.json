@@ -1,0 +1,13 @@
+{
+  "name": "token-pilot-marketplace",
+  "owner": {
+    "name": "Vannh Pambou"
+  },
+  "plugins": [
+    {
+      "name": "token-pilot",
+      "source": "./",
+      "description": "Routage automatique des modèles et économie de tokens pour Claude Code."
+    }
+  ]
+}

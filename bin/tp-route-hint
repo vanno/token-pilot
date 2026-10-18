@@ -1,0 +1,37 @@
+#!/bin/sh
+# token-pilot — hook UserPromptSubmit
+# Ajoute un rappel compact des règles de routage à chaque demande.
+# Désactivation : TOKEN_PILOT_QUIET=1
+
+[ "${TOKEN_PILOT_QUIET:-0}" = "1" ] && exit 0
+
+input=$(cat)
+
+# Extrait le prompt (approximatif, sans dépendance à jq)
+prompt=$(printf '%s' "$input" | sed -n 's/.*"prompt"[[:space:]]*:[[:space:]]*"\(.*\)".*/\1/p' | head -c 400)
+
+# Pas de rappel pour les messages très courts (« ok », « oui », « merci »…)
+len=$(printf '%s' "$prompt" | wc -c | tr -d ' ')
+if [ -n "$prompt" ] && [ "$len" -lt 15 ]; then
+  exit 0
+fi
+
+# Demande explicite de Fable
+case "$(printf '%s' "$prompt" | tr '[:upper:]' '[:lower:]')" in
+  *fable*)
+    fable_line="L'utilisateur mentionne Fable : s'il le demande vraiment pour cette tâche, utilise Agent avec model \"fable\"."
+    ;;
+  *)
+    fable_line="Fable : jamais de ta propre initiative (crédits payants possibles) ; propose-le seulement si Opus a échoué."
+    ;;
+esac
+
+cat <<EOF
+[token-pilot] Route cette demande au modèle le moins cher qui suffit :
+- Exploration, recherche, lecture/résumé de code ou de logs → sous-agent eclaireur (Haiku).
+- Tests, lint, build, sorties longues → sous-agent verificateur (Haiku).
+- Tâche courante ou petite modif → toi (Sonnet). Implémentation claire mais volumineuse → artisan (Sonnet).
+- Conception multi-modules, schéma BDD, sécurité/RLS, paiements, migration risquée, revue avant prod, bug résistant après 2 essais → architecte (Opus).
+- $fable_line
+Annonce la délégation en quelques mots. Règles détaillées : skill routage-modeles.
+EOF

@@ -1,0 +1,84 @@
+#!/bin/sh
+# token-pilot — barre d'état
+# Affiche : modèle · effort · contexte % · quota 5h % · quota 7j % · coût session
+# et enregistre un instantané par session pour /bilan-conso.
+# Nécessite jq (inclus dans macOS 15+, sinon : brew install jq).
+
+input=$(cat)
+state_dir="$HOME/.claude/token-pilot/sessions"
+
+if ! command -v jq >/dev/null 2>&1; then
+  printf 'token-pilot : installe jq pour la barre d'"'"'état (brew install jq)'
+  exit 0
+fi
+
+j() { printf '%s' "$input" | jq -r "$1" 2>/dev/null; }
+
+model=$(j '.model.display_name // .model.id // "?"')
+model_id=$(j '.model.id // ""')
+effort=$(j '.effort.level // empty')
+ctx=$(j '.context_window.used_percentage // empty' | cut -d. -f1)
+h5=$(j '.rate_limits.five_hour.used_percentage // empty' | cut -d. -f1)
+d7=$(j '.rate_limits.seven_day.used_percentage // empty' | cut -d. -f1)
+cost=$(j '.cost.total_cost_usd // empty')
+sid=$(j '.session_id // empty')
+proj=$(j '.workspace.project_dir // .workspace.current_dir // .cwd // ""')
+
+# Couleurs : vert < 60, jaune < 85, rouge au-delà
+col() {
+  v=${1:-0}
+  if [ "$v" -ge 85 ] 2>/dev/null; then printf '\033[31m'
+  elif [ "$v" -ge 60 ] 2>/dev/null; then printf '\033[33m'
+  else printf '\033[32m'; fi
+}
+rst='\033[0m'
+
+out="$model"
+[ -n "$effort" ] && out="$out · $effort"
+[ -n "$ctx" ] && out="$out · ctx $(col "$ctx")${ctx}%${rst}"
+[ -n "$h5" ] && out="$out · 5h $(col "$h5")${h5}%${rst}"
+[ -n "$d7" ] && out="$out · 7j $(col "$d7")${d7}%${rst}"
+if [ -n "$cost" ]; then
+  out="$out · $(printf '$%.2f' "$cost" 2>/dev/null)"
+fi
+
+# Conseils contextuels courts
+if [ -n "$ctx" ] && [ "$ctx" -ge 60 ] 2>/dev/null; then
+  out="$out · \033[33m/compact conseillé${rst}"
+fi
+case "$(printf '%s' "$model_id$model" | tr '[:upper:]' '[:lower:]')" in
+  *opus*|*fable*) out="$out · \033[33m/model sonnet ?${rst}" ;;
+esac
+
+printf '%b' "$out"
+
+# Instantané pour le bilan (une ligne JSON par session, écrasée à chaque rendu)
+if [ -n "$sid" ]; then
+  mkdir -p "$state_dir" 2>/dev/null
+  f="$state_dir/$sid.json"
+  prev=$(jq -c . "$f" 2>/dev/null)
+  [ -z "$prev" ] && prev='{}'
+  # On garde les maxima de la session (contexte, quotas) même si un rendu ne les contient pas.
+  printf '%s' "$input" | jq -c \
+    --arg day "$(date +%Y-%m-%d)" \
+    --arg ts "$(date +%s)" \
+    --arg proj "$proj" \
+    --argjson prev "$prev" '
+    def mx(a; b): if a == null then b elif b == null then a elif a > b then a else b end;
+    {
+      session_id: .session_id,
+      day: $day,
+      ts: ($ts|tonumber),
+      project: $proj,
+      model: (.model.id // .model.display_name),
+      models: ((($prev.models // []) + [(.model.id // .model.display_name)]) | unique),
+      cost_usd: (.cost.total_cost_usd // $prev.cost_usd // 0),
+      duration_ms: (.cost.total_duration_ms // $prev.duration_ms // 0),
+      lines_added: (.cost.total_lines_added // $prev.lines_added // 0),
+      lines_removed: (.cost.total_lines_removed // $prev.lines_removed // 0),
+      ctx_pct: mx(.context_window.used_percentage; $prev.ctx_pct),
+      five_hour_pct: mx(.rate_limits.five_hour.used_percentage; $prev.five_hour_pct),
+      seven_day_pct: (.rate_limits.seven_day.used_percentage // $prev.seven_day_pct)
+    }' > "$f.tmp" 2>/dev/null && mv "$f.tmp" "$f"
+fi
+exit 0

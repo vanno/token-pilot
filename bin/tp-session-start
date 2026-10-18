@@ -1,0 +1,33 @@
+#!/bin/sh
+# token-pilot — hook SessionStart
+# Signale si la session ne tourne pas sur Sonnet, et rappelle le bilan le lundi.
+
+[ "${TOKEN_PILOT_QUIET:-0}" = "1" ] && exit 0
+
+input=$(cat)
+model=$(printf '%s' "$input" | tr '\n' ' ' | sed -n 's/.*"model"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | tr '[:upper:]' '[:lower:]')
+
+msg=""
+case "$model" in
+  ""|*sonnet*) ;;
+  *opus*|*fable*|*best*)
+    msg="La session démarre sur $model alors que token-pilot prévoit Sonnet comme orchestrateur (plus économe). Signale-le à l'utilisateur en une phrase au début de ta première réponse et rappelle-lui « /model sonnet » ; les tâches difficiles iront quand même à Opus via l'architecte."
+    ;;
+  *haiku*)
+    msg="La session démarre sur Haiku. Pour le développement, Sonnet est l'orchestrateur prévu par token-pilot : rappelle « /model sonnet » si la tâche dépasse une simple question."
+    ;;
+esac
+
+# Lundi : rappel du bilan hebdo (une seule fois par jour)
+if [ "$(date +%u)" = "1" ]; then
+  state_dir="$HOME/.claude/token-pilot"
+  mkdir -p "$state_dir" 2>/dev/null
+  today=$(date +%Y-%m-%d)
+  if [ "$(cat "$state_dir/last-monday-reminder" 2>/dev/null)" != "$today" ]; then
+    printf '%s' "$today" > "$state_dir/last-monday-reminder" 2>/dev/null
+    msg="$msg On est lundi : propose une fois, en une ligne, de lancer « /bilan-conso » pour voir la consommation de la semaine écoulée."
+  fi
+fi
+
+[ -n "$msg" ] && printf '[token-pilot] %s\n' "$msg"
+exit 0

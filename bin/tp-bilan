@@ -1,0 +1,120 @@
+#!/usr/bin/env python3
+"""token-pilot — bilan de consommation sur N jours (défaut 7).
+
+Lit les instantanés écrits par la barre d'état (~/.claude/token-pilot/sessions)
+et le journal des sous-agents (~/.claude/token-pilot/agents.tsv).
+Usage : tp-bilan [jours]
+"""
+import json
+import os
+import sys
+import time
+from collections import Counter, defaultdict
+from datetime import date, timedelta
+
+DAYS = int(sys.argv[1]) if len(sys.argv) > 1 and sys.argv[1].isdigit() else 7
+BASE = os.path.expanduser("~/.claude/token-pilot")
+SESS = os.path.join(BASE, "sessions")
+AGENTS = os.path.join(BASE, "agents.tsv")
+since = date.today() - timedelta(days=DAYS - 1)
+prune_before = time.time() - 60 * 86400
+
+
+def family(model):
+    m = (model or "").lower()
+    for f in ("fable", "opus", "sonnet", "haiku"):
+        if f in m:
+            return f.capitalize()
+    return model or "?"
+
+
+sessions = []
+if os.path.isdir(SESS):
+    for name in os.listdir(SESS):
+        if not name.endswith(".json"):
+            continue
+        path = os.path.join(SESS, name)
+        try:
+            with open(path) as fh:
+                s = json.load(fh)
+        except Exception:
+            continue
+        if s.get("ts", 0) < prune_before:
+            try:
+                os.remove(path)  # nettoyage des instantanés de plus de 60 jours
+            except OSError:
+                pass
+            continue
+        try:
+            d = date.fromisoformat(s.get("day", ""))
+        except ValueError:
+            continue
+        if d >= since:
+            sessions.append(s)
+
+if not sessions:
+    print(f"Aucune donnée sur les {DAYS} derniers jours.")
+    print("La barre d'état token-pilot doit être active (lancer /token-pilot-setup) pour enregistrer la conso.")
+    sys.exit(0)
+
+total_cost = sum(s.get("cost_usd") or 0 for s in sessions)
+by_model = defaultdict(lambda: [0, 0.0])
+by_project = defaultdict(lambda: [0, 0.0])
+by_day = defaultdict(float)
+high_ctx = 0
+heavy_sessions = 0
+for s in sessions:
+    fam = family(s.get("model"))
+    by_model[fam][0] += 1
+    by_model[fam][1] += s.get("cost_usd") or 0
+    proj = os.path.basename((s.get("project") or "").rstrip("/")) or "?"
+    by_project[proj][0] += 1
+    by_project[proj][1] += s.get("cost_usd") or 0
+    by_day[s["day"]] += s.get("cost_usd") or 0
+    if (s.get("ctx_pct") or 0) >= 80:
+        high_ctx += 1
+    if any(family(m) in ("Opus", "Fable") for m in (s.get("models") or [])):
+        heavy_sessions += 1
+
+latest = max(sessions, key=lambda s: s.get("ts", 0))
+peak_7d = max((s.get("seven_day_pct") or 0) for s in sessions)
+peak_5h = max((s.get("five_hour_pct") or 0) for s in sessions)
+
+agents = Counter()
+if os.path.exists(AGENTS):
+    with open(AGENTS) as fh:
+        for line in fh:
+            parts = line.rstrip("\n").split("\t")
+            if len(parts) >= 2:
+                try:
+                    if date.fromisoformat(parts[0]) >= since:
+                        agents[parts[1]] += 1
+                except ValueError:
+                    pass
+
+print(f"# Bilan token-pilot — {since.isoformat()} → {date.today().isoformat()} ({DAYS} j)")
+print()
+print(f"Sessions : {len(sessions)}")
+print(f"Équivalent API cumulé : ${total_cost:.2f}  (valeur indicative ; sur Max, c'est le quota qui compte)")
+print(f"Quota 7 jours : dernier {latest.get('seven_day_pct') or 0:.0f} %, pic {peak_7d:.0f} %")
+print(f"Quota 5 heures : pic {peak_5h:.0f} %")
+print(f"Sessions ayant dépassé 80 % de contexte : {high_ctx}")
+print(f"Sessions passées en Opus/Fable comme modèle principal : {heavy_sessions}")
+print()
+print("## Par modèle de session principale")
+for fam, (n, c) in sorted(by_model.items(), key=lambda x: -x[1][1]):
+    share = (c / total_cost * 100) if total_cost else 0
+    print(f"- {fam} : {n} sessions, ${c:.2f} ({share:.0f} %)")
+print()
+print("## Par projet")
+for proj, (n, c) in sorted(by_project.items(), key=lambda x: -x[1][1])[:8]:
+    print(f"- {proj} : {n} sessions, ${c:.2f}")
+print()
+print("## Par jour")
+for d in sorted(by_day):
+    print(f"- {d} : ${by_day[d]:.2f}")
+if agents:
+    print()
+    print("## Sous-agents lancés")
+    for a, n in agents.most_common():
+        print(f"- {a} : {n}")
