@@ -36,7 +36,7 @@ Prérequis : Claude Code récent (v2.1.292+ pour l'effort par sous-agent), `jq`,
 
 ```sh
 # dans Claude Code
-/plugin marketplace add vanno/token-pilote
+/plugin marketplace add vanno/token-pilot
 /plugin install token-pilot@token-pilot-marketplace
 ```
 
