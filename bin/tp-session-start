@@ -5,7 +5,11 @@
 [ "${TOKEN_PILOT_QUIET:-0}" = "1" ] && exit 0
 
 input=$(cat)
-model=$(printf '%s' "$input" | tr '\n' ' ' | sed -n 's/.*"model"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | tr '[:upper:]' '[:lower:]')
+if command -v jq >/dev/null 2>&1; then
+  model=$(printf '%s' "$input" | jq -r '(.model | if type == "object" then (.id // .display_name) else . end) // empty' 2>/dev/null | tr '[:upper:]' '[:lower:]')
+else
+  model=$(printf '%s' "$input" | tr '\n' ' ' | sed -n 's/.*"model"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | tr '[:upper:]' '[:lower:]')
+fi
 
 msg=""
 case "$model" in

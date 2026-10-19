@@ -28,6 +28,7 @@ skills/bilan-conso                /bilan-conso [jours] — bilan de la semaine
 skills/token-pilot-setup          /token-pilot-setup — config initiale du poste
 hooks/hooks.json                  UserPromptSubmit, SessionStart, SubagentStart
 bin/                              scripts appelés par les hooks et les skills
+tests/run.sh                      tests des scripts (lancés aussi par GitHub Actions)
 ```
 
 ## Installation (repo GitHub privé)
@@ -48,7 +49,28 @@ Puis, une seule fois par machine :
 
 Ce skill règle `"model": "sonnet"` et la barre d'état dans `~/.claude/settings.json` (un plugin ne peut pas le faire seul).
 
-Pour tes associés : même chose, il suffit qu'ils aient accès au repo.
+## Partager avec tes associés
+
+Le repo est privé : chaque associé doit d'abord y avoir accès.
+
+1. **Toi, une fois par associé** : sur GitHub, *Settings → Collaborators → Add people*, rôle **Read** (suffisant pour installer et recevoir les mises à jour). L'associé accepte l'invitation reçue par mail.
+2. **L'associé, sur sa machine** :
+   - installer `jq` (`brew install jq` sur macOS, `sudo apt install jq` sous Linux) et vérifier `python3 --version` ;
+   - se connecter à GitHub dans le terminal : `gh auth login` (ou une clé SSH déjà configurée) ;
+   - dans Claude Code :
+     ```
+     /plugin marketplace add vanno/token-pilot
+     /plugin install token-pilot@token-pilot-marketplace
+     /token-pilot-setup
+     ```
+   - redémarrer Claude Code. La barre d'état doit afficher `Sonnet 5.5 · … · ctx … %`.
+3. **Vérifier** : demander « explore ce repo et résume-le » doit déclencher l'`eclaireur` (Haiku).
+
+**Mises à jour** : quand tu pousses une nouvelle version sur `main` (pense à monter `version` dans `.claude-plugin/plugin.json`), chacun lance `/plugin marketplace update token-pilot-marketplace`, puis relance `/token-pilot-setup` si la barre d'état a changé.
+
+**Désinstaller** : `/plugin uninstall token-pilot@token-pilot-marketplace`, puis retirer `statusLine` (et `model` si voulu) de `~/.claude/settings.json`.
+
+**En cas de souci** : `Repository not found` à l'ajout du marketplace = l'invitation GitHub n'est pas acceptée ou `gh auth login` n'est pas fait ; barre d'état « installe jq » = `jq` manquant ; routage qui ne se déclenche pas = vérifier qu'aucune variable `ANTHROPIC_MODEL` ou `CLAUDE_CODE_SUBAGENT_MODEL*` n'est définie (`/token-pilot-setup` le contrôle).
 
 ## Utilisation au quotidien
 

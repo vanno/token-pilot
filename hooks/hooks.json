@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/bin/tp-route-hint",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/tp-route-hint\"",
             "timeout": 5
           }
         ]
@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/bin/tp-session-start",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/tp-session-start\"",
             "timeout": 5
           }
         ]
@@ -27,7 +27,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/bin/tp-agent-log",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/tp-agent-log\"",
             "timeout": 5
           }
         ]

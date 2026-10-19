@@ -3,10 +3,15 @@
 input=$(cat)
 dir="$HOME/.claude/token-pilot"
 mkdir -p "$dir" 2>/dev/null
-flat=$(printf '%s' "$input" | tr '\n' ' ')
-agent=$(printf '%s' "$flat" | sed -n 's/.*"agent_type"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
-[ -z "$agent" ] && agent=$(printf '%s' "$flat" | sed -n 's/.*"subagent_type"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+if command -v jq >/dev/null 2>&1; then
+  agent=$(printf '%s' "$input" | jq -r '.agent_type // .subagent_type // empty' 2>/dev/null)
+  sid=$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null)
+else
+  flat=$(printf '%s' "$input" | tr '\n' ' ')
+  agent=$(printf '%s' "$flat" | sed -n 's/.*"agent_type"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+  [ -z "$agent" ] && agent=$(printf '%s' "$flat" | sed -n 's/.*"subagent_type"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+  sid=$(printf '%s' "$flat" | sed -n 's/.*"session_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+fi
 [ -z "$agent" ] && agent="inconnu"
-sid=$(printf '%s' "$flat" | sed -n 's/.*"session_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
 printf '%s\t%s\t%s\n' "$(date +%Y-%m-%d)" "$agent" "$sid" >> "$dir/agents.tsv" 2>/dev/null
 exit 0
