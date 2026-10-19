@@ -3,6 +3,9 @@
   "owner": {
     "name": "Vannh Pambou"
   },
+  "metadata": {
+    "description": "token-pilot : routage automatique des modèles et économie de tokens pour Claude Code."
+  },
   "plugins": [
     {
       "name": "token-pilot",

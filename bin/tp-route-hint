@@ -7,8 +7,12 @@
 
 input=$(cat)
 
-# Extrait le prompt (approximatif, sans dépendance à jq)
-prompt=$(printf '%s' "$input" | sed -n 's/.*"prompt"[[:space:]]*:[[:space:]]*"\(.*\)".*/\1/p' | head -c 400)
+# Extrait le prompt : jq si présent, sinon approximation sed (s'arrête au premier guillemet non échappé)
+if command -v jq >/dev/null 2>&1; then
+  prompt=$(printf '%s' "$input" | jq -r '.prompt // empty' 2>/dev/null | head -c 400)
+else
+  prompt=$(printf '%s' "$input" | sed -n 's/.*"prompt"[[:space:]]*:[[:space:]]*"\(\([^"\\]\|\\.\)*\)".*/\1/p' | head -c 400)
+fi
 
 # Pas de rappel pour les messages très courts (« ok », « oui », « merci »…)
 len=$(printf '%s' "$prompt" | wc -c | tr -d ' ')

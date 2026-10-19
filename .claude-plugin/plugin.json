@@ -1,6 +1,6 @@
 {
   "name": "token-pilot",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Optimise la consommation de Claude Code : routage automatique de chaque tâche vers le bon modèle (Haiku / Sonnet / Opus), hygiène de contexte, barre d'état de conso, audit de projet et bilan hebdo.",
   "author": {
     "name": "Vannh Pambou"
