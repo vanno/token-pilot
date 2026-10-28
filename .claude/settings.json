@@ -2,6 +2,7 @@
   "hooks": {
     "SessionStart": [{"hooks": [{"type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/agent-manager-cloud.mjs\"", "timeout": 10}]}],
     "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/agent-manager-cloud.mjs\"", "timeout": 10}]}],
+    "PreToolUse": [{"hooks": [{"type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/agent-manager-cloud.mjs\"", "timeout": 10}]}],
     "PostToolUse": [{"hooks": [{"type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/agent-manager-cloud.mjs\"", "timeout": 10}]}],
     "PostToolUseFailure": [{"hooks": [{"type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/agent-manager-cloud.mjs\"", "timeout": 10}]}],
     "PermissionRequest": [{"hooks": [{"type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/agent-manager-cloud.mjs\"", "timeout": 10}]}],
