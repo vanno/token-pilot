@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "SessionStart": [{"hooks": [{"type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/agent-manager-cloud.mjs\"", "timeout": 10}]}],
+    "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/agent-manager-cloud.mjs\"", "timeout": 10}]}],
+    "PostToolUse": [{"hooks": [{"type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/agent-manager-cloud.mjs\"", "timeout": 10}]}],
+    "PostToolUseFailure": [{"hooks": [{"type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/agent-manager-cloud.mjs\"", "timeout": 10}]}],
+    "PermissionRequest": [{"hooks": [{"type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/agent-manager-cloud.mjs\"", "timeout": 10}]}],
+    "Notification": [{"hooks": [{"type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/agent-manager-cloud.mjs\"", "timeout": 10}]}],
+    "SubagentStart": [{"hooks": [{"type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/agent-manager-cloud.mjs\"", "timeout": 10}]}],
+    "SubagentStop": [{"hooks": [{"type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/agent-manager-cloud.mjs\"", "timeout": 10}]}],
+    "Stop": [{"hooks": [{"type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/agent-manager-cloud.mjs\"", "timeout": 10}]}],
+    "StopFailure": [{"hooks": [{"type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/agent-manager-cloud.mjs\"", "timeout": 10}]}],
+    "PreCompact": [{"hooks": [{"type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/agent-manager-cloud.mjs\"", "timeout": 10}]}],
+    "SessionEnd": [{"hooks": [{"type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/agent-manager-cloud.mjs\"", "timeout": 10}]}]
+  }
+}
