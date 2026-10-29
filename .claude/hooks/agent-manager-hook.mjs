@@ -5,7 +5,7 @@ import {homedir, hostname, tmpdir} from 'node:os';
 import {join, resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
 
-const VERSION = '98d2d19e8567';
+const VERSION = '9a9bea9c568f';
 const url = process.env.AGENT_MANAGER_URL;
 const token = process.env.AGENT_MANAGER_TOKEN;
 if (!url || !token) process.exit(0);
@@ -180,6 +180,18 @@ function resultText(response) {
   return JSON.stringify(response);
 }
 
+// Les programmes qui lisent sans rien publier : une commande faite d'eux seuls cite des liens et des chemins, elle n'en produit aucun.
+const READERS = new Set(['cat', 'head', 'tail', 'sed', 'grep', 'egrep', 'rg', 'awk', 'less', 'more', 'jq', 'ls', 'find', 'wc', 'diff', 'nl', 'cut', 'sort', 'uniq', 'tr', 'echo', 'printf', 'cd', 'pwd', 'stat', 'file', 'which', 'true']);
+const GIT_READS = new Set(['log', 'show', 'diff', 'status', 'blame', 'grep']);
+
+function onlyReads(command) {
+  const text = String(command ?? '');
+  // Une redirection vers un fichier écrit quelque chose : ce n'est plus une lecture.
+  if (/(^|[^0-9&])>>?\s*(?!&|\/dev\/null)/.test(text)) return false;
+  const parts = text.split(/&&|\|\||;|\||\n/).map((part) => part.trim().split(/\s+/)).filter((words) => words[0]);
+  return parts.length > 0 && parts.every(([head, next]) => READERS.has(head) || (head === 'git' && GIT_READS.has(next ?? '')));
+}
+
 // Ce que l'outil a produit : le fichier qu'il a écrit, et pour une commande, un sous-agent ou un outil MCP,
 // les liens publiés et les fichiers que sa réponse cite, s'ils ont été écrits pendant l'outil (un find ou un ls ne produit rien).
 function outputsOf(event, text) {
@@ -200,9 +212,12 @@ function outputsOf(event, text) {
   const input = event.tool_input ?? {};
   if (/^(Write|Edit|MultiEdit|NotebookEdit)$/.test(tool) && typeof input.file_path === 'string') file(input.file_path, true);
   if (tool !== 'Bash' && tool !== 'Task' && tool !== 'Agent' && !tool.startsWith('mcp__')) return [...found.values()];
+  if (tool === 'Bash' && onlyReads(input.command)) return [...found.values()];
   const sample = text.slice(0, 200_000);
   for (const match of sample.matchAll(/https:\/\/[^\s"'<>()\[\]{}\\]+/g)) {
     const link = match[0].replace(/[.,;:!?]+$/, '');
+    // Un lien abrégé (« https://…/rapport.pdf ») est un exemple, pas une adresse.
+    if (link.includes('…')) continue;
     const kind = /^https:\/\/claude\.ai\/(code\/)?artifact\//.test(link)
       ? 'artifact'
       : /^https:\/\/github\.com\/[^/]+\/[^/]+\/pull\/\d+$/.test(link)
@@ -303,15 +318,23 @@ if (uploadAt > 1) {
     const list = JSON.parse(readFileSync(listFile, 'utf8'));
     unlinkSync(listFile);
     for (const item of (list.files ?? []).slice(0, 12)) {
-      try {
-        if (statSync(item.path).size > OUTPUT_MAX) continue;
-        await fetch(base + '/api/ingest/output?session=' + encodeURIComponent(list.session) + '&path=' + encodeURIComponent(item.path), {
-          method: 'POST',
-          headers: {'content-type': 'application/octet-stream', authorization: 'Bearer ' + token},
-          body: readFileSync(item.path),
-          signal: AbortSignal.timeout(120_000)
-        });
-      } catch {}
+      let size = -1;
+      try { size = statSync(item.path).size; } catch {}
+      if (size < 0 || size > OUTPUT_MAX) continue;
+      // Trois essais, à 2 puis 4 secondes : un réseau qui coupe ou une application qui redémarre ne perdent plus le fichier.
+      for (let attempt = 0; attempt < 3; attempt++) {
+        if (attempt) await new Promise((done) => setTimeout(done, attempt * 2000));
+        try {
+          const response = await fetch(base + '/api/ingest/output?session=' + encodeURIComponent(list.session) + '&path=' + encodeURIComponent(item.path), {
+            method: 'POST',
+            headers: {'content-type': 'application/octet-stream', authorization: 'Bearer ' + token},
+            body: readFileSync(item.path),
+            signal: AbortSignal.timeout(120_000)
+          });
+          // Déposé, ou refusé pour de bon (non permis, trop gros) : seul un serveur en panne ou débordé vaut un nouvel essai.
+          if (response.status < 500 && response.status !== 429) break;
+        } catch {}
+      }
     }
   } catch {}
   process.exit(0);
