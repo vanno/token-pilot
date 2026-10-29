@@ -6,7 +6,7 @@ import {homedir, hostname, tmpdir} from 'node:os';
 import {join, resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
 
-const VERSION = 'b8135f23a4fc';
+const VERSION = 'e55d8edbe2de';
 const url = process.env.AGENT_MANAGER_URL;
 const token = process.env.AGENT_MANAGER_TOKEN;
 if (!url || !token) process.exit(0);
@@ -39,6 +39,11 @@ const WRITERS = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit']);
 // Un fichier de secrets ne part jamais en copie (même motif que SECRET_PATTERN de lib/live/files.ts).
 const SECRET_FILE = /^(\.env(\.(?!example$|sample$|template$|dist$)[^/]*)?|\.envrc|\.dev\.vars|id_(rsa|dsa|ecdsa|ed25519)|\.npmrc|\.pypirc|\.netrc|\.pgpass|\.git-credentials|credentials(\.json)?|secrets?\.(json|ya?ml|toml|env)|service[-_]?account[^/]*\.json|[^/]*\.(pem|key|p12|pfx|jks|keystore|kdbx|tfstate))$/i;
 const copyFile = (session, suffix) => join(copyDir, String(session).replace(/[^A-Za-z0-9_-]/g, '').slice(0, 120) + suffix);
+
+// Le nom d'un sous-agent : la description que la session donne à l'outil Agent, notée avant son départ, reprise à son démarrage.
+const namesDir = join(tmpdir(), 'agent-manager-names');
+const namePrefix = (session) => String(session).replace(/[^A-Za-z0-9_-]/g, '').slice(0, 120) + '.';
+const NAME_FRESH_MS = 60_000;
 
 function tail(path, bytes) {
   const size = statSync(path).size;
@@ -175,6 +180,43 @@ async function policyFor(session) {
   }
   // L'application ne répond pas : la dernière politique connue tient encore un moment, puis plus rien ne bloque.
   return cached && Date.now() - cached.at < POLICY_STALE_MS ? cached.policy : null;
+}
+
+// Un appel de l'outil Agent laisse un billet : la sorte demandée et la description, dans l'ordre des départs.
+function noteName(session, input) {
+  const description = typeof input?.description === 'string' ? input.description.trim() : '';
+  if (!session || !description) return;
+  try {
+    mkdirSync(namesDir, {recursive: true});
+    const type = typeof input.subagent_type === 'string' && input.subagent_type ? input.subagent_type : 'general-purpose';
+    writeFileSync(join(namesDir, namePrefix(session) + Date.now() + '-' + process.pid), JSON.stringify({type, description: description.slice(0, 300)}));
+  } catch {}
+}
+
+// Le sous-agent qui démarre prend le plus ancien billet de sa sorte. Le renommage est atomique : deux départs simultanés ne prennent pas le même.
+function claimName(session, agentType) {
+  const wanted = String(agentType || 'general-purpose').toLowerCase();
+  let names = [];
+  try {
+    names = readdirSync(namesDir).filter((name) => name.startsWith(namePrefix(session)) && !name.endsWith('.taken')).sort();
+  } catch {
+    return null;
+  }
+  for (const name of names) {
+    const file = join(namesDir, name);
+    try {
+      if (Date.now() - statSync(file).mtimeMs > NAME_FRESH_MS) {
+        unlinkSync(file);
+        continue;
+      }
+      const ticket = JSON.parse(readFileSync(file, 'utf8'));
+      if (String(ticket?.type || 'general-purpose').toLowerCase() !== wanted) continue;
+      renameSync(file, file + '.taken');
+      unlinkSync(file + '.taken');
+      return typeof ticket.description === 'string' ? ticket.description : null;
+    } catch {}
+  }
+  return null;
 }
 
 // Le texte d'une réponse d'outil : la sortie d'une commande, le contenu d'un fichier, le texte d'un outil MCP.
@@ -418,7 +460,10 @@ try {
       writeFileSync(clockFile(event.tool_use_id), String(Date.now()));
     }
     const denied = deniedBy(await policyFor(event.session_id), event.tool_name, event.tool_input);
-    if (!denied) process.exit(0);
+    if (!denied) {
+      if (event.tool_name === 'Agent' || event.tool_name === 'Task') noteName(event.session_id, event.tool_input);
+      process.exit(0);
+    }
     answer({
       ...(denied.halt ? {continue: false, stopReason: denied.reason} : {}),
       hookSpecificOutput: {hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: denied.reason}
@@ -459,6 +504,11 @@ try {
     }
   }
 
+  if (hook === 'SubagentStart' && event.session_id) {
+    const asked = claimName(event.session_id, event.agent_type);
+    if (asked) event.agent_manager_task = asked;
+  }
+
   if (event.transcript_path && !event.agent_id && hook !== 'SessionEnd') {
     const usage = lastUsage(event.transcript_path);
     if (usage) {
@@ -496,7 +546,7 @@ try {
 
   if (hook === 'SessionStart') {
     // Les horloges d'outils interrompus et les politiques oubliées ne s'accumulent pas : plus d'un jour, on les jette.
-    for (const dir of [clockDir, policyDir, waitDir, uploadDir, copyDir]) {
+    for (const dir of [clockDir, policyDir, waitDir, uploadDir, copyDir, namesDir]) {
       try {
         for (const name of readdirSync(dir)) {
           const file = join(dir, name);
