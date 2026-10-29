@@ -9,6 +9,17 @@
             "timeout": 10
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/agent-manager-cloud.mjs\" wait",
+            "async": true,
+            "asyncRewake": true,
+            "timeout": 3300
+          }
+        ]
       }
     ],
     "UserPromptSubmit": [
@@ -108,6 +119,17 @@
             "timeout": 10
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/agent-manager-cloud.mjs\" wait",
+            "async": true,
+            "asyncRewake": true,
+            "timeout": 3300
+          }
+        ]
       }
     ],
     "StopFailure": [
@@ -133,6 +155,28 @@
       }
     ],
     "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/agent-manager-cloud.mjs\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/agent-manager-cloud.mjs\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "InstructionsLoaded": [
       {
         "hooks": [
           {

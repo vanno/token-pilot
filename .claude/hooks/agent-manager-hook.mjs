@@ -5,7 +5,7 @@ import {homedir, hostname, tmpdir} from 'node:os';
 import {join, resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
 
-const VERSION = '97a30810629a';
+const VERSION = '095ea1d01410';
 const url = process.env.AGENT_MANAGER_URL;
 const token = process.env.AGENT_MANAGER_TOKEN;
 if (!url || !token) process.exit(0);
@@ -19,6 +19,12 @@ const clockFile = (id) => join(clockDir, String(id).replace(/[^A-Za-z0-9_-]/g, '
 const policyDir = join(tmpdir(), 'agent-manager-policy');
 const POLICY_FRESH_MS = 15_000;
 const POLICY_STALE_MS = 10 * 60_000;
+
+// L'attente d'une session au repos : une seule par session, la plus récente prend le relais.
+const waitDir = join(tmpdir(), 'agent-manager-wait');
+const WAIT_MS = 50 * 60_000;
+// Le rythme de relève se règle pour les tests ; sinon 10 s, puis 30 s après dix minutes.
+const WAIT_POLL_MS = Number(process.env.AGENT_MANAGER_WAIT_POLL_MS) || 0;
 
 function tail(path, bytes) {
   const size = statSync(path).size;
@@ -117,6 +123,18 @@ async function policyFor(session) {
   return cached && Date.now() - cached.at < POLICY_STALE_MS ? cached.policy : null;
 }
 
+// Le texte d'une réponse d'outil : la sortie d'une commande, le contenu d'un fichier, le texte d'un outil MCP.
+function resultText(response) {
+  if (response === undefined || response === null) return '';
+  if (typeof response === 'string') return response;
+  const parts = Array.isArray(response) ? response : Array.isArray(response.content) ? response.content : null;
+  if (parts) return parts.map((part) => (typeof part === 'string' ? part : typeof part?.text === 'string' ? part.text : '')).join('\n');
+  if (typeof response.stdout === 'string' || typeof response.stderr === 'string') return [response.stdout, response.stderr].filter(Boolean).join('\n');
+  if (typeof response.file?.content === 'string') return response.file.content;
+  if (typeof response.content === 'string') return response.content;
+  return JSON.stringify(response);
+}
+
 // Ce qu'un garde-fou relit : la commande pour Bash, le chemin pour un fichier, tout l'appel pour « * ».
 function guardSubject(guard, tool, input) {
   const files = {Edit: /^(Edit|MultiEdit|NotebookEdit)$/, Write: /^Write$/, Read: /^(Read|Glob|Grep)$/};
@@ -165,12 +183,49 @@ function answer(output) {
   process.stdout.write(JSON.stringify(output));
 }
 
+// La session au repos relève sa boîte : toutes les 10 s les dix premières minutes, puis toutes les 30 s.
+async function waitForInstruction(session) {
+  const file = join(waitDir, String(session).replace(/[^A-Za-z0-9_-]/g, '').slice(0, 120) || 'session');
+  const mine = process.pid + '-' + Date.now();
+  try {
+    mkdirSync(waitDir, {recursive: true});
+    writeFileSync(file, mine);
+  } catch {
+    return;
+  }
+  const owned = () => {
+    try { return readFileSync(file, 'utf8') === mine; } catch {}
+    return false;
+  };
+  const started = Date.now();
+  while (Date.now() - started < WAIT_MS) {
+    await new Promise((resolve) => setTimeout(resolve, WAIT_POLL_MS || (Date.now() - started < 10 * 60_000 ? 10_000 : 30_000)));
+    if (!owned()) return;
+    const inbox = await call('/api/control/inbox', {session}, 5000);
+    if (inbox?.stop) break;
+    if (inbox?.instruction) {
+      try { unlinkSync(file); } catch {}
+      process.stderr.write(String(inbox.instruction));
+      process.exit(2);
+    }
+  }
+  if (owned()) {
+    try { unlinkSync(file); } catch {}
+  }
+}
+
 let raw = '';
 for await (const chunk of process.stdin) raw += chunk;
 
 try {
   const event = JSON.parse(raw);
   const hook = event.hook_event_name;
+
+  if (process.argv.includes('wait')) {
+    // Seule une session racine attend, à son démarrage ou à la fin d'un tour.
+    if ((hook === 'Stop' || hook === 'SessionStart') && !event.agent_id && event.session_id) await waitForInstruction(event.session_id);
+    process.exit(0);
+  }
 
   if (hook === 'PreToolUse') {
     // Rien ne part tant que rien n'est refusé : on note l'heure, l'envoi se fait à la fin de l'outil.
@@ -198,7 +253,12 @@ try {
       if (started > 0) event.duration_ms = Math.max(Date.now() - started, 0);
     } catch {}
   }
-  // On ne renvoie jamais la réponse d'un outil : elle peut porter n'importe quoi.
+  // La réponse d'un outil peut porter n'importe quoi : sa taille part toujours, un extrait seulement si l'organisation l'a permis.
+  if ((hook === 'PostToolUse' || hook === 'PostToolUseFailure') && 'tool_response' in event) {
+    const text = resultText(event.tool_response);
+    event.tool_result_chars = text.length;
+    if (text && (await policyFor(event.session_id))?.tool_results === true) event.tool_result = text.slice(0, 6000);
+  }
   delete event.tool_response;
 
   if (event.transcript_path && !event.agent_id && hook !== 'SessionEnd') {
@@ -230,7 +290,7 @@ try {
 
   if (hook === 'SessionStart') {
     // Les horloges d'outils interrompus et les politiques oubliées ne s'accumulent pas : plus d'un jour, on les jette.
-    for (const dir of [clockDir, policyDir]) {
+    for (const dir of [clockDir, policyDir, waitDir]) {
       try {
         for (const name of readdirSync(dir)) {
           const file = join(dir, name);
@@ -245,6 +305,9 @@ try {
   if (hook === 'SessionStart') await selfUpdate(reply?.hook);
 
   if ((hook === 'SessionStart' || hook === 'UserPromptSubmit') && control?.context) {
+    answer({hookSpecificOutput: {hookEventName: hook, additionalContext: control.context}});
+  } else if ((hook === 'PostToolUse' || hook === 'PostToolUseFailure') && control?.context) {
+    // Une consigne pour cet agent, remise pendant qu'il travaille.
     answer({hookSpecificOutput: {hookEventName: hook, additionalContext: control.context}});
   } else if (hook === 'Stop' && control?.instruction) {
     // Une consigne en file relance le tour, avec elle pour seule demande.
