@@ -1,9 +1,11 @@
 #!/usr/bin/env node
-import {closeSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, statSync, unlinkSync, writeFileSync} from 'node:fs';
+import {closeSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, statSync, unlinkSync, writeFileSync} from 'node:fs';
 import {execFileSync} from 'node:child_process';
-import {hostname, tmpdir} from 'node:os';
-import {join} from 'node:path';
+import {homedir, hostname, tmpdir} from 'node:os';
+import {join, resolve} from 'node:path';
+import {fileURLToPath} from 'node:url';
 
+const VERSION = '97a30810629a';
 const url = process.env.AGENT_MANAGER_URL;
 const token = process.env.AGENT_MANAGER_TOKEN;
 if (!url || !token) process.exit(0);
@@ -136,6 +138,29 @@ function deniedBy(policy, tool, input) {
   return null;
 }
 
+// La copie installée dans ~/.claude se remplace par la version courante ; une copie d'un dépôt, jamais.
+function installedHere() {
+  try {
+    const own = resolve(fileURLToPath(import.meta.url));
+    const home = resolve(join(homedir(), '.claude', 'agent-manager-hook.mjs'));
+    return process.platform === 'win32' ? own.toLowerCase() === home.toLowerCase() : own === home;
+  } catch {}
+  return false;
+}
+
+async function selfUpdate(latest) {
+  if (!latest || latest === VERSION || !/^[a-f0-9]{6,40}$/.test(latest) || !installedHere()) return;
+  try {
+    const response = await fetch(base + '/api/ingest/hook', {signal: AbortSignal.timeout(3000)});
+    if (!response.ok) return;
+    const script = await response.text();
+    if (!script.startsWith('#!/usr/bin/env node') || !script.includes("const VERSION = '" + latest + "'") || script.length > 200_000) return;
+    const own = fileURLToPath(import.meta.url);
+    writeFileSync(own + '.next', script);
+    renameSync(own + '.next', own);
+  } catch {}
+}
+
 function answer(output) {
   process.stdout.write(JSON.stringify(output));
 }
@@ -193,8 +218,10 @@ try {
   delete event.agent_transcript_path;
 
   if (hook === 'SessionStart' || hook === 'UserPromptSubmit' || hook === 'Stop') {
-    event.origin = process.env.CLAUDE_CODE_REMOTE === 'true' ? 'cloud' : 'local';
+    event.origin = process.env.CLAUDE_CODE_PROJECTS_SESSION === '1' ? 'project' : process.env.CLAUDE_CODE_REMOTE === 'true' ? 'cloud' : 'local';
     event.host = hostname();
+    event.hook_version = VERSION;
+    if (process.env.CLAUDE_CODE_REMOTE_SESSION_ID) event.remote_session = process.env.CLAUDE_CODE_REMOTE_SESSION_ID;
     if (event.cwd) {
       const branch = gitBranch(event.cwd);
       if (branch) event.git_branch = branch;
@@ -213,7 +240,9 @@ try {
     }
   }
 
-  const control = (await call('/api/ingest', event, 4000))?.control;
+  const reply = await call('/api/ingest', event, 4000);
+  const control = reply?.control;
+  if (hook === 'SessionStart') await selfUpdate(reply?.hook);
 
   if ((hook === 'SessionStart' || hook === 'UserPromptSubmit') && control?.context) {
     answer({hookSpecificOutput: {hookEventName: hook, additionalContext: control.context}});
