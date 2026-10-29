@@ -5,7 +5,7 @@ import {homedir, hostname, tmpdir} from 'node:os';
 import {join, resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
 
-const VERSION = '5ffeb3ca3e7f';
+const VERSION = '98d2d19e8567';
 const url = process.env.AGENT_MANAGER_URL;
 const token = process.env.AGENT_MANAGER_TOKEN;
 if (!url || !token) process.exit(0);
@@ -89,12 +89,52 @@ function turnUsage(path) {
   return null;
 }
 
-function gitBranch(cwd) {
+// Le titre de la session : le dernier donné à la main (/rename), sinon le dernier que Claude Code a trouvé.
+function sessionTitle(path) {
   try {
-    const branch = execFileSync('git', ['-C', cwd, 'rev-parse', '--abbrev-ref', 'HEAD'], {timeout: 1500, stdio: ['ignore', 'pipe', 'ignore'], encoding: 'utf8'}).trim();
-    return branch && branch !== 'HEAD' ? branch : null;
+    // Les lignes viennent de la plus récente à la plus ancienne.
+    let found = null;
+    let summary = null;
+    for (const line of tail(path, 256 * 1024)) {
+      if (!line.includes('-title"') && !line.includes('"summary"')) continue;
+      const entry = parse(line);
+      if (entry?.type === 'custom-title' && typeof entry.customTitle === 'string') return entry.customTitle.slice(0, 200) || null;
+      if (entry?.type === 'ai-title' && typeof entry.aiTitle === 'string') found ??= entry.aiTitle;
+      else if (entry?.type === 'summary' && typeof entry.summary === 'string') summary ??= entry.summary;
+    }
+    return (found ?? summary)?.slice(0, 200) || null;
   } catch {}
   return null;
+}
+
+function git(dir, args) {
+  try {
+    return execFileSync('git', ['-C', dir, ...args], {timeout: 1500, stdio: ['ignore', 'pipe', 'ignore'], encoding: 'utf8'}).trim() || null;
+  } catch {}
+  return null;
+}
+
+// Le dépôt où travaille la session : celui du dossier, sinon le plus récemment touché juste en dessous.
+function repoDir(cwd) {
+  const top = git(cwd, ['rev-parse', '--show-toplevel']);
+  if (top) return top;
+  let best = null;
+  try {
+    for (const entry of readdirSync(cwd, {withFileTypes: true}).slice(0, 80)) {
+      if (!entry.isDirectory() || entry.name.startsWith('.')) continue;
+      try {
+        const at = statSync(join(cwd, entry.name, '.git')).mtimeMs;
+        if (!best || at > best.at) best = {dir: join(cwd, entry.name), at};
+      } catch {}
+    }
+  } catch {}
+  return best?.dir ?? null;
+}
+
+// « propriétaire/nom » d'après le remote, sinon le nom du dossier.
+function repoName(dir) {
+  const slug = /([A-Za-z0-9_.-]+)[/:]([A-Za-z0-9_.-]+?)(?:\.git)?\/?$/.exec(git(dir, ['remote', 'get-url', 'origin']) ?? '');
+  return slug ? slug[1] + '/' + slug[2] : (dir.split(/[\\/]/).pop() || null);
 }
 
 async function call(path, body, ms) {
@@ -339,6 +379,10 @@ try {
       const turn = turnUsage(event.transcript_path);
       if (turn) event.turn_usage = turn;
     }
+    if (hook === 'SessionStart' || hook === 'UserPromptSubmit' || hook === 'Stop') {
+      const title = sessionTitle(event.transcript_path);
+      if (title) event.title = title;
+    }
   }
   delete event.transcript_path;
   delete event.agent_transcript_path;
@@ -348,9 +392,13 @@ try {
     event.host = hostname();
     event.hook_version = VERSION;
     if (process.env.CLAUDE_CODE_REMOTE_SESSION_ID) event.remote_session = process.env.CLAUDE_CODE_REMOTE_SESSION_ID;
-    if (event.cwd) {
-      const branch = gitBranch(event.cwd);
+    const dir = event.cwd ? repoDir(event.cwd) : null;
+    if (dir) {
+      // Rien sur une tête détachée ; un dépôt sans commit a déjà sa branche.
+      const branch = git(dir, ['symbolic-ref', '--short', '-q', 'HEAD']);
       if (branch) event.git_branch = branch;
+      const repo = repoName(dir);
+      if (repo) event.repo = repo;
     }
   }
 
