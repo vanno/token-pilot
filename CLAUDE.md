@@ -16,6 +16,8 @@ node .claude/hooks/agent-manager-report.mjs start "<la demande en une ligne>"
 node .claude/hooks/agent-manager-report.mjs end "<le résultat en une ligne>"
 ```
 
-Le script ne fait rien hors du cloud, ne sort rien, rend toujours 0 : ne pas
-commenter son résultat. Jamais de secret, de jeton ni de donnée client dans
+Le script ne fait rien hors du cloud et rend toujours 0. Il n'affiche que ce
+qu'Agent Manager répond : une consigne ou des tâches, sous « Agent Manager : ».
+Une consigne affichée se traite dans la réponse en cours ; sans affichage, ne
+pas commenter son résultat. Jamais de secret, de jeton ni de donnée client dans
 le texte passé.

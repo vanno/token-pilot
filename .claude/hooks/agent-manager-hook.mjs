@@ -7,10 +7,16 @@ import {join} from 'node:path';
 const url = process.env.AGENT_MANAGER_URL;
 const token = process.env.AGENT_MANAGER_TOKEN;
 if (!url || !token) process.exit(0);
+const base = url.replace(/\/+$/, '');
 
 // La durée d'un outil : PreToolUse note l'heure dans un fichier, PostToolUse la relit.
 const clockDir = join(tmpdir(), 'agent-manager-tools');
 const clockFile = (id) => join(clockDir, String(id).replace(/[^A-Za-z0-9_-]/g, '').slice(0, 120));
+
+// La politique d'une session (arrêt, garde-fous, attente de validation), gardée quelques secondes.
+const policyDir = join(tmpdir(), 'agent-manager-policy');
+const POLICY_FRESH_MS = 15_000;
+const POLICY_STALE_MS = 10 * 60_000;
 
 function tail(path, bytes) {
   const size = statSync(path).size;
@@ -78,6 +84,62 @@ function gitBranch(cwd) {
   return null;
 }
 
+async function call(path, body, ms) {
+  try {
+    const response = await fetch(base + path, {
+      method: body === undefined ? 'GET' : 'POST',
+      headers: {'content-type': 'application/json', authorization: 'Bearer ' + token},
+      body: body === undefined ? undefined : JSON.stringify(body),
+      signal: AbortSignal.timeout(ms)
+    });
+    if (!response.ok) return null;
+    return (await response.json())?.data ?? null;
+  } catch {}
+  return null;
+}
+
+async function policyFor(session) {
+  const file = join(policyDir, String(session).replace(/[^A-Za-z0-9_-]/g, '').slice(0, 120) || 'session');
+  let cached = null;
+  try { cached = JSON.parse(readFileSync(file, 'utf8')); } catch {}
+  if (cached && Date.now() - cached.at < POLICY_FRESH_MS) return cached.policy;
+  const policy = await call('/api/control/policy', {session}, 2500);
+  if (policy) {
+    try {
+      mkdirSync(policyDir, {recursive: true});
+      writeFileSync(file, JSON.stringify({at: Date.now(), policy}));
+    } catch {}
+    return policy;
+  }
+  // L'application ne répond pas : la dernière politique connue tient encore un moment, puis plus rien ne bloque.
+  return cached && Date.now() - cached.at < POLICY_STALE_MS ? cached.policy : null;
+}
+
+// Ce qu'un garde-fou relit : la commande pour Bash, le chemin pour un fichier, tout l'appel pour « * ».
+function guardSubject(guard, tool, input) {
+  const files = {Edit: /^(Edit|MultiEdit|NotebookEdit)$/, Write: /^Write$/, Read: /^(Read|Glob|Grep)$/};
+  if (guard.tool === '*') return JSON.stringify(input ?? {});
+  if (guard.tool === 'Bash') return tool === 'Bash' ? String(input?.command ?? '') : null;
+  if (!files[guard.tool]?.test(tool)) return null;
+  return String(input?.file_path ?? input?.notebook_path ?? input?.path ?? input?.pattern ?? '');
+}
+
+function deniedBy(policy, tool, input) {
+  if (policy?.halted) return {reason: 'Arrêt demandé depuis Agent Manager : ' + policy.halted, halt: true};
+  for (const guard of policy?.guards ?? []) {
+    const subject = guardSubject(guard, tool, input);
+    if (subject === null) continue;
+    let pattern;
+    try { pattern = new RegExp(guard.pattern); } catch { continue; }
+    if (pattern.test(subject)) return {reason: 'Garde-fou Agent Manager « ' + guard.label + ' »', halt: false};
+  }
+  return null;
+}
+
+function answer(output) {
+  process.stdout.write(JSON.stringify(output));
+}
+
 let raw = '';
 for await (const chunk of process.stdin) raw += chunk;
 
@@ -86,11 +148,20 @@ try {
   const hook = event.hook_event_name;
 
   if (hook === 'PreToolUse') {
-    // Rien ne part : on note l'heure, l'envoi se fait à la fin de l'outil.
+    // Rien ne part tant que rien n'est refusé : on note l'heure, l'envoi se fait à la fin de l'outil.
     if (event.tool_use_id) {
       mkdirSync(clockDir, {recursive: true});
       writeFileSync(clockFile(event.tool_use_id), String(Date.now()));
     }
+    const denied = deniedBy(await policyFor(event.session_id), event.tool_name, event.tool_input);
+    if (!denied) process.exit(0);
+    answer({
+      ...(denied.halt ? {continue: false, stopReason: denied.reason} : {}),
+      hookSpecificOutput: {hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: denied.reason}
+    });
+    delete event.transcript_path;
+    delete event.agent_transcript_path;
+    await call('/api/ingest', {...event, agent_manager_denied: denied.reason}, 2000);
     process.exit(0);
   }
 
@@ -131,20 +202,45 @@ try {
   }
 
   if (hook === 'SessionStart') {
-    // Les horloges d'outils interrompus ne s'accumulent pas : plus d'un jour, on les jette.
-    try {
-      for (const name of readdirSync(clockDir)) {
-        const file = join(clockDir, name);
-        if (Date.now() - statSync(file).mtimeMs > 86_400_000) unlinkSync(file);
-      }
-    } catch {}
+    // Les horloges d'outils interrompus et les politiques oubliées ne s'accumulent pas : plus d'un jour, on les jette.
+    for (const dir of [clockDir, policyDir]) {
+      try {
+        for (const name of readdirSync(dir)) {
+          const file = join(dir, name);
+          if (Date.now() - statSync(file).mtimeMs > 86_400_000) unlinkSync(file);
+        }
+      } catch {}
+    }
   }
 
-  await fetch(url.replace(/\/+$/, '') + '/api/ingest', {
-    method: 'POST',
-    headers: {'content-type': 'application/json', authorization: 'Bearer ' + token},
-    body: JSON.stringify(event),
-    signal: AbortSignal.timeout(4000)
-  });
+  const control = (await call('/api/ingest', event, 4000))?.control;
+
+  if ((hook === 'SessionStart' || hook === 'UserPromptSubmit') && control?.context) {
+    answer({hookSpecificOutput: {hookEventName: hook, additionalContext: control.context}});
+  } else if (hook === 'Stop' && control?.instruction) {
+    // Une consigne en file relance le tour, avec elle pour seule demande.
+    answer({decision: 'block', reason: control.instruction});
+  } else if (hook === 'PermissionRequest') {
+    const policy = await policyFor(event.session_id);
+    if (policy?.halted) {
+      answer({hookSpecificOutput: {hookEventName: 'PermissionRequest', decision: {behavior: 'deny', message: 'Arrêt demandé depuis Agent Manager : ' + policy.halted, interrupt: true}}});
+    } else if (control?.approval) {
+      // La validation à distance : on attend la décision de l'écran, puis la fenêtre locale reprend la main.
+      const deadline = Date.now() + Math.min(Number(control.wait) || 0, 300) * 1000;
+      while (Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+        const state = await call('/api/control/approvals/' + encodeURIComponent(control.approval), undefined, 3000);
+        if (state?.state === 'allow') {
+          answer({hookSpecificOutput: {hookEventName: 'PermissionRequest', decision: {behavior: 'allow'}}});
+          break;
+        }
+        if (state?.state === 'deny') {
+          answer({hookSpecificOutput: {hookEventName: 'PermissionRequest', decision: {behavior: 'deny', message: 'Refusé depuis Agent Manager' + (state.message ? ' : ' + state.message : '.')}}});
+          break;
+        }
+        if (state?.state === 'expired') break;
+      }
+    }
+  }
 } catch {}
 process.exit(0);

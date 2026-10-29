@@ -4,7 +4,7 @@
 //   node .claude/hooks/agent-manager-report.mjs start "tâche en cours"
 //   node .claude/hooks/agent-manager-report.mjs end "résumé de la réponse"
 // Ne fait rien hors du cloud ni sans AGENT_MANAGER_URL et AGENT_MANAGER_TOKEN.
-// Toujours silencieux, toujours exit 0.
+// N'affiche que ce que l'application répond (une consigne, des tâches), toujours exit 0.
 import {spawn} from 'node:child_process';
 // `check` affiche ce que le script voit, sans rien envoyer.
 import {existsSync, readdirSync, statSync} from 'node:fs';
@@ -66,7 +66,17 @@ if (phase === 'start') event.prompt = text || 'nouvelle demande';
 else event.last_assistant_message = text || 'réponse terminée';
 
 const hook = join(dirname(fileURLToPath(import.meta.url)), 'agent-manager-hook.mjs');
-const child = spawn(process.execPath, [hook], {stdio: ['pipe', 'ignore', 'ignore']});
+const child = spawn(process.execPath, [hook], {stdio: ['pipe', 'pipe', 'ignore']});
+let output = '';
+child.stdout.on('data', (chunk) => (output += chunk));
 child.on('error', () => process.exit(0));
-child.on('exit', () => process.exit(0));
+child.on('exit', () => {
+  // Ce que l'application répond (consigne en file, contexte) s'affiche en clair : la session le lit.
+  try {
+    const reply = JSON.parse(output);
+    const said = reply?.hookSpecificOutput?.additionalContext ?? reply?.reason;
+    if (said) process.stdout.write('Agent Manager :\n' + said + '\n');
+  } catch {}
+  process.exit(0);
+});
 child.stdin.end(JSON.stringify(event));
