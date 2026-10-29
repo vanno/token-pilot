@@ -5,7 +5,7 @@ import {homedir, hostname, tmpdir} from 'node:os';
 import {join, resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
 
-const VERSION = '095ea1d01410';
+const VERSION = '9ac8629c2aca';
 const url = process.env.AGENT_MANAGER_URL;
 const token = process.env.AGENT_MANAGER_TOKEN;
 if (!url || !token) process.exit(0);
@@ -323,7 +323,10 @@ try {
         await new Promise((resolve) => setTimeout(resolve, 2000));
         const state = await call('/api/control/approvals/' + encodeURIComponent(control.approval), undefined, 3000);
         if (state?.state === 'allow') {
-          answer({hookSpecificOutput: {hookEventName: 'PermissionRequest', decision: {behavior: 'allow'}}});
+          // Une question répondue à l'écran : ses réponses, par texte de question, dans l'entrée de l'outil (AskUserQuestion seul).
+          const answers = event.tool_name === 'AskUserQuestion' && state.answers && typeof state.answers === 'object' ? state.answers : null;
+          const decision = answers ? {behavior: 'allow', updatedInput: {...event.tool_input, answers}} : {behavior: 'allow'};
+          answer({hookSpecificOutput: {hookEventName: 'PermissionRequest', decision}});
           break;
         }
         if (state?.state === 'deny') {
