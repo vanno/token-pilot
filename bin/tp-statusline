@@ -2,17 +2,18 @@
 # token-pilot — barre d'état
 # Affiche : modèle · effort · contexte % · quota 5h % · quota 7j % · coût session
 # et enregistre un instantané par session pour /bilan-conso.
-# Nécessite jq (inclus dans macOS 15+, sinon : brew install jq).
+# Nécessite jq (inclus dans macOS 15+, sinon : brew install jq ; Windows : winget install jqlang.jq).
 
 input=$(cat)
 state_dir="$HOME/.claude/token-pilot/sessions"
 
 if ! command -v jq >/dev/null 2>&1; then
-  printf 'token-pilot : installe jq pour la barre d'"'"'état (brew install jq)'
+  printf 'token-pilot : installe jq pour la barre d'"'"'état (brew install jq, winget install jqlang.jq)'
   exit 0
 fi
 
-j() { printf '%s' "$input" | jq -r "$1" 2>/dev/null; }
+# tr -d '\r' : jq.exe natif sous Git Bash écrit des fins de ligne CRLF.
+j() { printf '%s' "$input" | jq -r "$1" 2>/dev/null | tr -d '\r'; }
 
 model=$(j '.model.display_name // .model.id // "?"')
 model_id=$(j '.model.id // ""')
@@ -39,7 +40,7 @@ out="$model"
 [ -n "$h5" ] && out="$out · 5h $(col "$h5")${h5}%${rst}"
 [ -n "$d7" ] && out="$out · 7j $(col "$d7")${d7}%${rst}"
 if [ -n "$cost" ]; then
-  out="$out · $(printf '$%.2f' "$cost" 2>/dev/null)"
+  out="$out · $(LC_ALL=C printf '$%.2f' "$cost" 2>/dev/null)"
 fi
 
 # Conseils contextuels courts

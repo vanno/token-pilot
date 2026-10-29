@@ -6,7 +6,7 @@
 
 input=$(cat)
 if command -v jq >/dev/null 2>&1; then
-  model=$(printf '%s' "$input" | jq -r '(.model | if type == "object" then (.id // .display_name) else . end) // empty' 2>/dev/null | tr '[:upper:]' '[:lower:]')
+  model=$(printf '%s' "$input" | jq -r '(.model | if type == "object" then (.id // .display_name) else . end) // empty' 2>/dev/null | tr -d '\r' | tr '[:upper:]' '[:lower:]')
 else
   model=$(printf '%s' "$input" | tr '\n' ' ' | sed -n 's/.*"model"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | tr '[:upper:]' '[:lower:]')
 fi
