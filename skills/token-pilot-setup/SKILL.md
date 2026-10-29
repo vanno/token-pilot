@@ -10,7 +10,7 @@ model: sonnet
 Un plugin ne peut pas fixer lui-même le modèle par défaut ni la barre d'état principale : il faut les écrire dans `~/.claude/settings.json`. Fais-le ainsi :
 
 1. **Vérifier les prérequis** avec Bash :
-   - `command -v jq` — si absent, dis à l'utilisateur : `brew install jq` (macOS) ou `sudo apt install jq`, puis continue (la barre d'état affichera un message en attendant).
+   - `command -v jq` — si absent, dis à l'utilisateur : `brew install jq` (macOS), `sudo apt install jq` (Linux) ou `winget install jqlang.jq` (Windows, puis rouvrir le terminal), puis continue (la barre d'état affichera un message en attendant).
    - `command -v python3` — nécessaire pour `/token-audit` et `/bilan-conso`. Si absent, signale-le.
    - `command -v tp-statusline` — chemin du script fourni par le plugin.
 

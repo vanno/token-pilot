@@ -9,7 +9,7 @@ input=$(cat)
 
 # Extrait le prompt : jq si présent, sinon approximation sed (s'arrête au premier guillemet non échappé)
 if command -v jq >/dev/null 2>&1; then
-  prompt=$(printf '%s' "$input" | jq -r '.prompt // empty' 2>/dev/null | head -c 400)
+  prompt=$(printf '%s' "$input" | jq -r '.prompt // empty' 2>/dev/null | tr -d '\r' | head -c 400)
 else
   prompt=$(printf '%s' "$input" | sed -n 's/.*"prompt"[[:space:]]*:[[:space:]]*"\(\([^"\\]\|\\.\)*\)".*/\1/p' | head -c 400)
 fi

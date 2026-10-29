@@ -4,8 +4,8 @@ input=$(cat)
 dir="$HOME/.claude/token-pilot"
 mkdir -p "$dir" 2>/dev/null
 if command -v jq >/dev/null 2>&1; then
-  agent=$(printf '%s' "$input" | jq -r '.agent_type // .subagent_type // empty' 2>/dev/null)
-  sid=$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null)
+  agent=$(printf '%s' "$input" | jq -r '.agent_type // .subagent_type // empty' 2>/dev/null | tr -d '\r')
+  sid=$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null | tr -d '\r')
 else
   flat=$(printf '%s' "$input" | tr '\n' ' ')
   agent=$(printf '%s' "$flat" | sed -n 's/.*"agent_type"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')

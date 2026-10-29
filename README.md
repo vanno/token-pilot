@@ -55,7 +55,7 @@ Le repo est privé : chaque associé doit d'abord y avoir accès.
 
 1. **Toi, une fois par associé** : sur GitHub, *Settings → Collaborators → Add people*, rôle **Read** (suffisant pour installer et recevoir les mises à jour). L'associé accepte l'invitation reçue par mail.
 2. **L'associé, sur sa machine** :
-   - installer `jq` (`brew install jq` sur macOS, `sudo apt install jq` sous Linux) et vérifier `python3 --version` ;
+   - installer `jq` (`brew install jq` sur macOS, `sudo apt install jq` sous Linux, `winget install jqlang.jq` sous Windows) et vérifier `python3 --version` ;
    - se connecter à GitHub dans le terminal : `gh auth login` (ou une clé SSH déjà configurée) ;
    - dans Claude Code :
      ```

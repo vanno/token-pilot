@@ -52,15 +52,54 @@ if command -v jq >/dev/null 2>&1; then
   PATH=$OLDPATH; rm -rf "$nojq"
 fi
 
+# jq.exe natif sous Git Bash : mêmes cas avec un jq qui répond en CRLF
+if command -v jq >/dev/null 2>&1; then
+  crlf=$(mktemp -d)
+  realjq=$(command -v jq)
+  printf '#!/bin/sh\n"%s" "$@" | sed "s/$/\\r/"\n' "$realjq" > "$crlf/jq"; chmod +x "$crlf/jq"
+  OLDPATH=$PATH; PATH="$crlf:$PATH"
+  run_cases "jq en CRLF (Windows)"
+  HOME=$(mktemp -d); export HOME
+  printf '%s' '{"session_id":"s1","agent_type":"eclaireur"}' | "$bin/tp-agent-log"
+  has "$(od -c "$HOME/.claude/token-pilot/agents.tsv")" '\r' && ko "agent-log : CR dans le journal" || ok "agent-log : pas de CR"
+  out=$(printf '%s' '{"session_id":"s3","model":{"display_name":"Sonnet 5.5"},"context_window":{"used_percentage":71}}' | "$bin/tp-statusline")
+  has "$out" "$(printf '\r')" && ko "statusline : CR dans le rendu" || ok "statusline : rendu sans CR"
+  [ -s "$HOME/.claude/token-pilot/sessions/s3.json" ] && ok "statusline : instantané au bon nom" || ko "statusline : nom d'instantané ($(ls "$HOME/.claude/token-pilot/sessions"))"
+  rm -rf "$HOME"
+  PATH=$OLDPATH; rm -rf "$crlf"
+fi
+
 echo "== barre d'état, bilan, audit"
 HOME=$(mktemp -d); export HOME
-out=$(printf '%s' '{"session_id":"s2","model":{"id":"claude-sonnet-5-5","display_name":"Sonnet 5.5"},"context_window":{"used_percentage":34},"rate_limits":{"five_hour":{"used_percentage":22},"seven_day":{"used_percentage":41}},"cost":{"total_cost_usd":1.2},"workspace":{"project_dir":"/p/demo"}}' | "$bin/tp-statusline")
-has "$out" "Sonnet 5.5" && has "$out" "7j" && ok "statusline : rendu" || ko "statusline : rendu ($out)"
-[ -s "$HOME/.claude/token-pilot/sessions/s2.json" ] && ok "statusline : instantané écrit" || ko "statusline : instantané"
 out=$(python3 "$bin/tp-bilan" 7)
-has "$out" "Sessions : 1" && ok "bilan : lit l'instantané" || ko "bilan ($out)"
+has "$out" "Aucune donnée" && ok "bilan : sans données" || ko "bilan : sans données ($out)"
+out=$(printf '%s' '{"session_id":"s2","model":{"id":"claude-sonnet-5-5","display_name":"Sonnet 5.5"},"context_window":{"used_percentage":34},"rate_limits":{"five_hour":{"used_percentage":22},"seven_day":{"used_percentage":41}},"cost":{"total_cost_usd":1.2},"workspace":{"project_dir":"/p/démo"}}' | "$bin/tp-statusline")
+has "$out" "Sonnet 5.5" && has "$out" "7j" && ok "statusline : rendu" || ko "statusline : rendu ($out)"
+has "$out" '$1.20' && ok "statusline : coût" || ko "statusline : coût ($out)"
+[ -s "$HOME/.claude/token-pilot/sessions/s2.json" ] && ok "statusline : instantané écrit" || ko "statusline : instantané"
+printf 'pas du json' > "$HOME/.claude/token-pilot/sessions/abime.json"
+out=$(python3 "$bin/tp-bilan" 7)
+has "$out" "Sessions : 1" && ok "bilan : lit l'instantané, ignore un fichier abîmé" || ko "bilan ($out)"
+has "$out" "démo" && ok "bilan : projet accentué" || ko "bilan : projet accentué"
+out=$(PYTHONIOENCODING=cp1252 python3 "$bin/tp-bilan" 7 2>&1) && ok "bilan : console cp1252 (Windows)" || ko "bilan : cp1252 ($out)"
 python3 "$bin/tp-audit" "$root" >/dev/null && ok "audit : s'exécute" || ko "audit"
+PYTHONIOENCODING=cp1252 python3 "$bin/tp-audit" "$root" >/dev/null 2>&1 && ok "audit : console cp1252 (Windows)" || ko "audit : cp1252"
+nojq=$(mktemp -d); ln -s "$(command -v cat)" "$nojq/cat"
+out=$(printf '%s' '{"model":{"display_name":"Sonnet"}}' | PATH=$nojq /bin/sh "$bin/tp-statusline")
+rm -rf "$nojq"
+has "$out" "installe jq" && ok "statusline : message sans jq" || ko "statusline : sans jq ($out)"
 rm -rf "$HOME"
+
+echo "== manifestes"
+for f in .claude-plugin/plugin.json .claude-plugin/marketplace.json hooks/hooks.json; do
+  python3 -c 'import json,sys; json.load(open(sys.argv[1], encoding="utf-8"))' "$root/$f" && ok "JSON valide : $f" || ko "JSON invalide : $f"
+done
+for f in "$root"/agents/*.md "$root"/skills/*/SKILL.md; do
+  [ "$(head -n 1 "$f")" = "---" ] && grep -q '^name:' "$f" && grep -q '^description:' "$f" && ok "frontmatter : ${f#$root/}" || ko "frontmatter : ${f#$root/}"
+done
+for f in "$root"/bin/*; do
+  [ -x "$f" ] && ok "exécutable : ${f#$root/}" || ko "non exécutable : ${f#$root/}"
+done
 
 echo
 [ "$fails" -eq 0 ] && echo "Tous les tests passent." || echo "$fails échec(s)."
