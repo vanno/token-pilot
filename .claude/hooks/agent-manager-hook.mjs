@@ -1,11 +1,12 @@
 #!/usr/bin/env node
-import {closeSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, statSync, unlinkSync, writeFileSync} from 'node:fs';
+import {appendFileSync, closeSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, statSync, unlinkSync, writeFileSync} from 'node:fs';
+import {createHash} from 'node:crypto';
 import {execFileSync, spawn} from 'node:child_process';
 import {homedir, hostname, tmpdir} from 'node:os';
 import {join, resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
 
-const VERSION = '9a9bea9c568f';
+const VERSION = 'b8135f23a4fc';
 const url = process.env.AGENT_MANAGER_URL;
 const token = process.env.AGENT_MANAGER_TOKEN;
 if (!url || !token) process.exit(0);
@@ -30,6 +31,14 @@ const WAIT_POLL_MS = Number(process.env.AGENT_MANAGER_WAIT_POLL_MS) || 0;
 const uploadDir = join(tmpdir(), 'agent-manager-upload');
 const PRODUCED = /\.(png|jpe?g|gif|webp|avif|mp4|m4v|webm|mov|mp3|wav|ogg|m4a|pdf|docx|xlsx|pptx|odt|ods|odp|csv)$/i;
 const OUTPUT_MAX = 25 * 1024 * 1024;
+
+// La copie des fichiers modifiés : les chemins écrits pendant un tour, envoyés à sa fin, et l'empreinte de ce qui est déjà parti.
+const copyDir = join(tmpdir(), 'agent-manager-copies');
+const COPY_MAX = 2 * 1024 * 1024;
+const WRITERS = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit']);
+// Un fichier de secrets ne part jamais en copie (même motif que SECRET_PATTERN de lib/live/files.ts).
+const SECRET_FILE = /^(\.env(\.(?!example$|sample$|template$|dist$)[^/]*)?|\.envrc|\.dev\.vars|id_(rsa|dsa|ecdsa|ed25519)|\.npmrc|\.pypirc|\.netrc|\.pgpass|\.git-credentials|credentials(\.json)?|secrets?\.(json|ya?ml|toml|env)|service[-_]?account[^/]*\.json|[^/]*\.(pem|key|p12|pfx|jks|keystore|kdbx|tfstate))$/i;
+const copyFile = (session, suffix) => join(copyDir, String(session).replace(/[^A-Za-z0-9_-]/g, '').slice(0, 120) + suffix);
 
 function tail(path, bytes) {
   const size = statSync(path).size;
@@ -340,6 +349,55 @@ if (uploadAt > 1) {
   process.exit(0);
 }
 
+// La copie des fichiers modifiés pendant un tour, lancée détachée à sa fin.
+const copyAt = process.argv.indexOf('copy');
+if (copyAt > 1) {
+  try {
+    const listFile = process.argv[copyAt + 1];
+    const session = process.argv[copyAt + 2];
+    const lines = readFileSync(listFile, 'utf8').split('\n');
+    unlinkSync(listFile);
+    // Un fichier modifié dix fois ne part qu'une fois, avec le dossier de sa dernière modification.
+    const edits = new Map();
+    for (const line of lines) {
+      const item = parse(line);
+      if (typeof item?.path !== 'string') continue;
+      edits.delete(item.path);
+      edits.set(item.path, typeof item.cwd === 'string' ? item.cwd : '');
+    }
+    const sentFile = copyFile(session, '.sent');
+    let sent = {};
+    try { sent = JSON.parse(readFileSync(sentFile, 'utf8')) ?? {}; } catch {}
+    for (const [path, cwd] of [...edits].slice(-40)) {
+      if (SECRET_FILE.test(path.replace(/^.*[\/\\]/, ''))) continue;
+      let bytes = null;
+      try {
+        const stat = statSync(path);
+        if (stat.isFile() && stat.size <= COPY_MAX) bytes = readFileSync(path);
+      } catch {}
+      if (!bytes) continue;
+      // Inchangé depuis sa dernière copie : rien ne repart.
+      const sha = createHash('sha256').update(bytes).digest('hex');
+      if (sent[path] === sha) continue;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        if (attempt) await new Promise((done) => setTimeout(done, attempt * 2000));
+        try {
+          const response = await fetch(base + '/api/ingest/copy?session=' + encodeURIComponent(session) + '&path=' + encodeURIComponent(path) + '&cwd=' + encodeURIComponent(cwd), {
+            method: 'POST',
+            headers: {'content-type': 'application/octet-stream', authorization: 'Bearer ' + token},
+            body: bytes,
+            signal: AbortSignal.timeout(60_000)
+          });
+          if (response.status === 200) sent[path] = sha;
+          if (response.status < 500 && response.status !== 429) break;
+        } catch {}
+      }
+    }
+    writeFileSync(sentFile, JSON.stringify(sent));
+  } catch {}
+  process.exit(0);
+}
+
 let raw = '';
 for await (const chunk of process.stdin) raw += chunk;
 
@@ -390,6 +448,17 @@ try {
   }
   delete event.tool_response;
 
+  // Un fichier écrit ou modifié, par la session ou un sous-agent : son chemin attend la fin du tour pour partir en copie.
+  if (hook === 'PostToolUse' && WRITERS.has(event.tool_name) && event.session_id) {
+    const file = event.tool_input?.file_path ?? event.tool_input?.notebook_path;
+    if (typeof file === 'string' && file) {
+      try {
+        mkdirSync(copyDir, {recursive: true});
+        appendFileSync(copyFile(event.session_id, '.edits'), JSON.stringify({path: resolve(event.cwd || process.cwd(), file), cwd: event.cwd ?? ''}) + '\n');
+      } catch {}
+    }
+  }
+
   if (event.transcript_path && !event.agent_id && hook !== 'SessionEnd') {
     const usage = lastUsage(event.transcript_path);
     if (usage) {
@@ -427,7 +496,7 @@ try {
 
   if (hook === 'SessionStart') {
     // Les horloges d'outils interrompus et les politiques oubliées ne s'accumulent pas : plus d'un jour, on les jette.
-    for (const dir of [clockDir, policyDir, waitDir, uploadDir]) {
+    for (const dir of [clockDir, policyDir, waitDir, uploadDir, copyDir]) {
       try {
         for (const name of readdirSync(dir)) {
           const file = join(dir, name);
@@ -449,6 +518,20 @@ try {
       const listFile = join(uploadDir, process.pid + '-' + Date.now() + '.json');
       writeFileSync(listFile, JSON.stringify({session: event.session_id, files}));
       spawn(process.execPath, [fileURLToPath(import.meta.url), 'upload', listFile], {detached: true, stdio: 'ignore', env: process.env}).unref();
+    } catch {}
+  }
+
+  // À la fin d'un tour, la dernière version de chaque fichier modifié, si l'organisation le permet : un processus détaché l'envoie.
+  if (reply && (hook === 'Stop' || hook === 'SessionEnd') && !event.agent_id && event.session_id) {
+    try {
+      const edits = copyFile(event.session_id, '.edits');
+      const listFile = edits + '.' + process.pid + '-' + Date.now();
+      renameSync(edits, listFile);
+      if ((await policyFor(event.session_id))?.outputs === true) {
+        spawn(process.execPath, [fileURLToPath(import.meta.url), 'copy', listFile, event.session_id], {detached: true, stdio: 'ignore', env: process.env}).unref();
+      } else {
+        unlinkSync(listFile);
+      }
     } catch {}
   }
 
