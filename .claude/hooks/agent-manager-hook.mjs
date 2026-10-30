@@ -6,7 +6,7 @@ import {homedir, hostname, tmpdir} from 'node:os';
 import {join, resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
 
-const VERSION = 'e55d8edbe2de';
+const VERSION = '75d52559d595';
 const url = process.env.AGENT_MANAGER_URL;
 const token = process.env.AGENT_MANAGER_TOKEN;
 if (!url || !token) process.exit(0);
@@ -34,8 +34,10 @@ const OUTPUT_MAX = 25 * 1024 * 1024;
 
 // La copie des fichiers modifiés : les chemins écrits pendant un tour, envoyés à sa fin, et l'empreinte de ce qui est déjà parti.
 const copyDir = join(tmpdir(), 'agent-manager-copies');
-const COPY_MAX = 2 * 1024 * 1024;
+const COPY_MAX = 10 * 1024 * 1024;
 const WRITERS = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit']);
+// Une image ou un PDF lu part aussi en copie (même motif que READ_COPY_PATTERN de lib/live/files.ts).
+const READ_COPY = /\.(png|jpe?g|gif|webp|avif|pdf)$/i;
 // Un fichier de secrets ne part jamais en copie (même motif que SECRET_PATTERN de lib/live/files.ts).
 const SECRET_FILE = /^(\.env(\.(?!example$|sample$|template$|dist$)[^/]*)?|\.envrc|\.dev\.vars|id_(rsa|dsa|ecdsa|ed25519)|\.npmrc|\.pypirc|\.netrc|\.pgpass|\.git-credentials|credentials(\.json)?|secrets?\.(json|ya?ml|toml|env)|service[-_]?account[^/]*\.json|[^/]*\.(pem|key|p12|pfx|jks|keystore|kdbx|tfstate))$/i;
 const copyFile = (session, suffix) => join(copyDir, String(session).replace(/[^A-Za-z0-9_-]/g, '').slice(0, 120) + suffix);
@@ -493,10 +495,10 @@ try {
   }
   delete event.tool_response;
 
-  // Un fichier écrit ou modifié, par la session ou un sous-agent : son chemin attend la fin du tour pour partir en copie.
-  if (hook === 'PostToolUse' && WRITERS.has(event.tool_name) && event.session_id) {
+  // Un fichier écrit ou modifié, ou une image ou un PDF lu, par la session ou un sous-agent : son chemin attend la fin du tour pour partir en copie.
+  if (hook === 'PostToolUse' && (WRITERS.has(event.tool_name) || event.tool_name === 'Read') && event.session_id) {
     const file = event.tool_input?.file_path ?? event.tool_input?.notebook_path;
-    if (typeof file === 'string' && file) {
+    if (typeof file === 'string' && file && (event.tool_name !== 'Read' || READ_COPY.test(file))) {
       try {
         mkdirSync(copyDir, {recursive: true});
         appendFileSync(copyFile(event.session_id, '.edits'), JSON.stringify({path: resolve(event.cwd || process.cwd(), file), cwd: event.cwd ?? ''}) + '\n');
