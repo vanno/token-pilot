@@ -1,12 +1,12 @@
 #!/usr/bin/env node
-import {appendFileSync, closeSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, statSync, unlinkSync, writeFileSync} from 'node:fs';
+import {appendFileSync, closeSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, statSync, unlinkSync, writeFileSync} from 'node:fs';
 import {createHash} from 'node:crypto';
 import {execFileSync, spawn} from 'node:child_process';
 import {homedir, hostname, tmpdir} from 'node:os';
 import {join, resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
 
-const VERSION = '75d52559d595';
+const VERSION = '5f39b2a6491b';
 const url = process.env.AGENT_MANAGER_URL;
 const token = process.env.AGENT_MANAGER_TOKEN;
 if (!url || !token) process.exit(0);
@@ -46,6 +46,11 @@ const copyFile = (session, suffix) => join(copyDir, String(session).replace(/[^A
 const namesDir = join(tmpdir(), 'agent-manager-names');
 const namePrefix = (session) => String(session).replace(/[^A-Za-z0-9_-]/g, '').slice(0, 120) + '.';
 const NAME_FRESH_MS = 60_000;
+
+// Les tâches planifiées de claude.ai : la réponse de leur outil, et la liste lue page par page, suivie dans un fichier par session.
+const schedulesDir = join(tmpdir(), 'agent-manager-schedules');
+const SCHEDULE_TOOL = /^mcp__claude[-_]code[-_]remote__(list_triggers|get_trigger)$/i;
+const SCHEDULE_CHAIN_MS = 30 * 60_000;
 
 function tail(path, bytes) {
   const size = statSync(path).size;
@@ -284,6 +289,140 @@ function outputsOf(event, text) {
   return [...found.values()];
 }
 
+// Les valeurs JSON d'une réponse d'outil MCP, partie par partie : une note en texte suit parfois la page.
+function jsonParts(response) {
+  const parts = Array.isArray(response) ? response : Array.isArray(response?.content) ? response.content : [response];
+  const found = [];
+  for (const part of parts) {
+    const text = typeof part === 'string' ? part : typeof part?.text === 'string' ? part.text : null;
+    const value = text === null ? part : parse(text.trim());
+    if (value && typeof value === 'object' && !Array.isArray(value)) found.push(value);
+  }
+  return found;
+}
+
+// Une tâche de claude.ai réduite à ce que l'écran montre : ni jeton, ni identifiant de connecteur, la consigne coupée.
+function slimTrigger(item) {
+  const state = item.derived_state && typeof item.derived_state === 'object' ? item.derived_state : {};
+  const last = item.last_run && typeof item.last_run === 'object' ? item.last_run : null;
+  const pick = (value) => (typeof value === 'string' ? value.slice(0, 400) : null);
+  return {
+    id: item.id,
+    name: pick(item.name),
+    created_kind: pick(item.created_kind),
+    prompt: pick(state.prompt ?? item.prompt),
+    model: pick(state.model || item.model),
+    cron_expression: pick(item.cron_expression),
+    run_once_at: pick(item.run_once_at),
+    next_run_at: pick(item.next_run_at),
+    enabled: typeof item.enabled === 'boolean' ? item.enabled : null,
+    ended_reason: pick(item.ended_reason),
+    suspension_reason: pick(item.suspension_reason),
+    connectors: (Array.isArray(item.mcp_connections) ? item.mcp_connections : []).map((connection) => pick(connection?.name)).filter(Boolean).slice(0, 30),
+    persistent_session_id: pick(item.persistent_session_id),
+    last_run: last ? {status: pick(last.status), fired_at: pick(last.fired_at), finished_at: pick(last.finished_at), session_id: pick(last.session_id)} : null,
+    created_at: pick(item.created_at)
+  };
+}
+
+// Une liste lue page par page : la première page la commence, une page suivante la continue si son curseur est celui attendu.
+// Elle ne vaut inventaire (les identifiants de toute la liste) que lue jusqu'au bout, sans filtre.
+function scheduleKnown(session, input, ids, more, next) {
+  const file = join(schedulesDir, String(session).replace(/[^A-Za-z0-9_-]/g, '').slice(0, 120) || 'session');
+  const cursor = typeof input?.cursor === 'string' && input.cursor ? input.cursor : null;
+  const unfiltered = (input?.enabled ?? null) === null && (input?.recurring ?? null) === null;
+  let chain = cursor === null ? {ids: [], whole: unfiltered} : null;
+  if (cursor !== null) {
+    try {
+      const saved = JSON.parse(readFileSync(file, 'utf8'));
+      if (saved?.next === cursor && Date.now() - saved.at < SCHEDULE_CHAIN_MS && Array.isArray(saved.ids)) chain = {ids: saved.ids, whole: saved.whole === true && unfiltered};
+    } catch {}
+  }
+  if (!chain) return null;
+  const all = [...new Set([...chain.ids, ...ids])];
+  try {
+    if (more && next && all.length <= 500) {
+      mkdirSync(schedulesDir, {recursive: true});
+      writeFileSync(file, JSON.stringify({at: Date.now(), next, ids: all, whole: chain.whole}));
+    } else {
+      unlinkSync(file);
+    }
+  } catch {}
+  return !more && chain.whole && all.length <= 500 ? all : null;
+}
+
+// Les tâches planifiées de claude.ai lues dans la réponse de list_triggers (une page) ou de get_trigger (une tâche).
+function cloudSchedules(event) {
+  let items = null;
+  let more = false;
+  let next = null;
+  for (const value of jsonParts(event.tool_response)) {
+    if (Array.isArray(value.data)) {
+      items = value.data;
+      more = value.has_more === true;
+      next = typeof value.next_cursor === 'string' && value.next_cursor ? value.next_cursor : null;
+      break;
+    }
+    const one = value.trigger && typeof value.trigger === 'object' ? value.trigger : value;
+    if (typeof one.id === 'string' && one.id.startsWith('trig_')) {
+      items = [one];
+      break;
+    }
+  }
+  if (!items) return null;
+  const listed = items.filter((item) => item && typeof item === 'object' && typeof item.id === 'string');
+  const known = /list_triggers$/i.test(String(event.tool_name)) ? scheduleKnown(event.session_id, event.tool_input, listed.map((item) => item.id), more, next) : null;
+  const owner = process.env.CLAUDE_CODE_ACCOUNT_UUID || listed.find((item) => typeof item.creator?.account_uuid === 'string')?.creator.account_uuid || 'claude';
+  return {source: 'cloud', owner, tasks: listed.slice(0, 200).map(slimTrigger), known};
+}
+
+// Les champs simples d'une en-tête YAML : « clé: valeur », entre guillemets ou non, ou en bloc (« > », « | ») sur les lignes en retrait qui suivent.
+function frontmatter(text) {
+  const fields = {};
+  const lines = text.split(/\r?\n/);
+  for (let at = 0; at < lines.length; at++) {
+    const match = /^([A-Za-z_][\w-]*):[ \t]*(.*)$/.exec(lines[at]);
+    if (!match) continue;
+    let value = match[2].trim();
+    if (/^[>|][+-]?$/.test(value)) {
+      const block = [];
+      while (at + 1 < lines.length && /^([ \t]|$)/.test(lines[at + 1])) block.push(lines[++at].trim());
+      value = block.join(value.startsWith('>') ? ' ' : '\n').trim();
+    } else if (value.length > 1 && /^(["']).*\1$/.test(value)) {
+      value = value.slice(1, -1);
+    }
+    fields[match[1]] = value;
+  }
+  return fields;
+}
+
+// Les tâches locales de Claude Desktop : un dossier par tâche, sa consigne dans SKILL.md, son nom et sa description en tête.
+function desktopSchedules() {
+  const dir = join(process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude'), 'scheduled-tasks');
+  let names;
+  try {
+    names = readdirSync(dir, {withFileTypes: true}).filter((entry) => entry.isDirectory() && !entry.name.startsWith('.')).map((entry) => entry.name).sort();
+  } catch {
+    return null;
+  }
+  const tasks = [];
+  for (const name of names.slice(0, 100)) {
+    try {
+      const file = join(dir, name, 'SKILL.md');
+      // Un lien symbolique ne se suit pas : seule la consigne écrite là part, jamais un fichier d'ailleurs.
+      const stat = lstatSync(file);
+      if (!stat.isFile() || stat.size > 65_536) continue;
+      const text = readFileSync(file, 'utf8');
+      const head = /^---\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)([\s\S]*)$/.exec(text);
+      const meta = head ? frontmatter(head[1]) : {};
+      const prompt = (head ? head[2] : text).trim();
+      tasks.push({id: name, name: (meta.name || name).slice(0, 300), description: meta.description ? meta.description.slice(0, 600) : null, prompt: prompt ? prompt.slice(0, 400) : null});
+    } catch {}
+  }
+  // Plus de cent dossiers : la liste n'est pas lue en entier, rien ne part de la base.
+  return {source: 'desktop', owner: (hostname() || 'poste').replace(/[^\w.:@-]/g, '-').slice(0, 120), tasks, known: names.length <= 100 ? names : null};
+}
+
 // Ce qu'un garde-fou relit : la commande pour Bash, le chemin pour un fichier, tout l'appel pour « * ».
 function guardSubject(guard, tool, input) {
   const files = {Edit: /^(Edit|MultiEdit|NotebookEdit)$/, Write: /^Write$/, Read: /^(Read|Glob|Grep)$/};
@@ -493,6 +632,11 @@ try {
     if (hook === 'PostToolUse') produced = outputsOf(event, text);
     if (produced.length) event.agent_manager_outputs = produced;
   }
+  // Une liste de tâches planifiées de claude.ai part réduite à ce que l'écran montre ; sa dernière page, avec les identifiants de toute la liste.
+  if (hook === 'PostToolUse' && SCHEDULE_TOOL.test(String(event.tool_name ?? '')) && 'tool_response' in event) {
+    const schedules = cloudSchedules(event);
+    if (schedules) event.agent_manager_schedules = schedules;
+  }
   delete event.tool_response;
 
   // Un fichier écrit ou modifié, ou une image ou un PDF lu, par la session ou un sous-agent : son chemin attend la fin du tour pour partir en copie.
@@ -548,7 +692,7 @@ try {
 
   if (hook === 'SessionStart') {
     // Les horloges d'outils interrompus et les politiques oubliées ne s'accumulent pas : plus d'un jour, on les jette.
-    for (const dir of [clockDir, policyDir, waitDir, uploadDir, copyDir, namesDir]) {
+    for (const dir of [clockDir, policyDir, waitDir, uploadDir, copyDir, namesDir, schedulesDir]) {
       try {
         for (const name of readdirSync(dir)) {
           const file = join(dir, name);
@@ -556,6 +700,9 @@ try {
         }
       } catch {}
     }
+    // Les tâches locales de Claude Desktop, relevées à chaque démarrage d'une session du poste.
+    const local = desktopSchedules();
+    if (local) event.agent_manager_schedules = local;
   }
 
   const reply = await call('/api/ingest', event, 4000);
