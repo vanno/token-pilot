@@ -6,7 +6,7 @@ import {homedir, hostname, tmpdir} from 'node:os';
 import {join, resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
 
-const VERSION = '5f39b2a6491b';
+const VERSION = '20126883bc6f';
 const url = process.env.AGENT_MANAGER_URL;
 const token = process.env.AGENT_MANAGER_TOKEN;
 if (!url || !token) process.exit(0);
@@ -236,6 +236,14 @@ function resultText(response) {
   if (typeof response.file?.content === 'string') return response.file.content;
   if (typeof response.content === 'string') return response.content;
   return JSON.stringify(response);
+}
+
+// L'identifiant de l'étape que TaskCreate vient d'ajouter au plan : {task: {id}}, sinon « Task #3 created ».
+function createdStepId(response) {
+  const id = response?.task?.id;
+  if ((typeof id === 'string' || typeof id === 'number') && /^[A-Za-z0-9_-]{1,40}$/.test(String(id))) return String(id);
+  const found = /Task #([A-Za-z0-9_-]{1,40}) created/.exec(resultText(response));
+  return found ? found[1] : null;
 }
 
 // Les programmes qui lisent sans rien publier : une commande faite d'eux seuls cite des liens et des chemins, elle n'en produit aucun.
@@ -636,6 +644,11 @@ try {
   if (hook === 'PostToolUse' && SCHEDULE_TOOL.test(String(event.tool_name ?? '')) && 'tool_response' in event) {
     const schedules = cloudSchedules(event);
     if (schedules) event.agent_manager_schedules = schedules;
+  }
+  // Une étape ajoutée au plan n'a son identifiant que dans la réponse : il part seul, pour que ses mises à jour la retrouvent.
+  if (hook === 'PostToolUse' && event.tool_name === 'TaskCreate' && 'tool_response' in event) {
+    const step = createdStepId(event.tool_response);
+    if (step) event.agent_manager_step_id = step;
   }
   delete event.tool_response;
 
