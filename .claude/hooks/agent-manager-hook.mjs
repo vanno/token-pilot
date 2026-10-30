@@ -6,7 +6,7 @@ import {homedir, hostname, tmpdir} from 'node:os';
 import {join, resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
 
-const VERSION = '20126883bc6f';
+const VERSION = '0b27e93f1d32';
 const url = process.env.AGENT_MANAGER_URL;
 const token = process.env.AGENT_MANAGER_TOKEN;
 if (!url || !token) process.exit(0);
@@ -309,7 +309,7 @@ function jsonParts(response) {
   return found;
 }
 
-// Une tâche de claude.ai réduite à ce que l'écran montre : ni jeton, ni identifiant de connecteur, la consigne coupée.
+// Une tâche de claude.ai réduite à ce que l'écran montre : ni jeton, ni identifiant de connecteur, la consigne coupée à 4 000 caractères.
 function slimTrigger(item) {
   const state = item.derived_state && typeof item.derived_state === 'object' ? item.derived_state : {};
   const last = item.last_run && typeof item.last_run === 'object' ? item.last_run : null;
@@ -318,7 +318,7 @@ function slimTrigger(item) {
     id: item.id,
     name: pick(item.name),
     created_kind: pick(item.created_kind),
-    prompt: pick(state.prompt ?? item.prompt),
+    prompt: typeof (state.prompt ?? item.prompt) === 'string' ? (state.prompt ?? item.prompt).slice(0, 4000) : null,
     model: pick(state.model || item.model),
     cron_expression: pick(item.cron_expression),
     run_once_at: pick(item.run_once_at),
@@ -328,7 +328,11 @@ function slimTrigger(item) {
     suspension_reason: pick(item.suspension_reason),
     connectors: (Array.isArray(item.mcp_connections) ? item.mcp_connections : []).map((connection) => pick(connection?.name)).filter(Boolean).slice(0, 30),
     persistent_session_id: pick(item.persistent_session_id),
-    last_run: last ? {status: pick(last.status), fired_at: pick(last.fired_at), finished_at: pick(last.finished_at), session_id: pick(last.session_id)} : null,
+    persist_session: typeof item.persist_session === 'boolean' ? item.persist_session : null,
+    permission_mode: pick(state.permission_mode),
+    created_surface: pick(item.created_surface),
+    created_via: pick(item.created_via),
+    last_run: last ? {status: pick(last.status), fired_at: pick(last.fired_at), finished_at: pick(last.finished_at), session_id: pick(last.session_id), failure_reason: pick(last.failure_reason)} : null,
     created_at: pick(item.created_at)
   };
 }
