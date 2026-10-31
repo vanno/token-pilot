@@ -6,7 +6,7 @@ import {homedir, hostname, tmpdir} from 'node:os';
 import {join, resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
 
-const VERSION = '0b27e93f1d32';
+const VERSION = '3033d0b04f1e';
 const url = process.env.AGENT_MANAGER_URL;
 const token = process.env.AGENT_MANAGER_TOKEN;
 if (!url || !token) process.exit(0);
@@ -615,6 +615,13 @@ try {
     const denied = deniedBy(await policyFor(event.session_id), event.tool_name, event.tool_input);
     if (!denied) {
       if (event.tool_name === 'Agent' || event.tool_name === 'Task') noteName(event.session_id, event.tool_input);
+      // Une question part dès qu'elle est posée : un fil de projet ou une session cloud la montre sans
+      // PermissionRequest, et l'écran ne saurait rien avant la réponse (lot 2026-10-31-ce-qui-bloque).
+      if (event.tool_name === 'AskUserQuestion') {
+        delete event.transcript_path;
+        delete event.agent_transcript_path;
+        await call('/api/ingest', event, 2000);
+      }
       process.exit(0);
     }
     answer({
