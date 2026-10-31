@@ -1,16 +1,17 @@
 #!/usr/bin/env node
 import {appendFileSync, closeSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, renameSync, statSync, unlinkSync, writeFileSync} from 'node:fs';
 import {createHash} from 'node:crypto';
-import {execFileSync, spawn} from 'node:child_process';
+import {execFileSync, execSync, spawn} from 'node:child_process';
 import {homedir, hostname, tmpdir} from 'node:os';
 import {join, resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
 
-const VERSION = '3033d0b04f1e';
+const VERSION = '0e9de6098587';
 const url = process.env.AGENT_MANAGER_URL;
 const token = process.env.AGENT_MANAGER_TOKEN;
-if (!url || !token) process.exit(0);
-const base = url.replace(/\/+$/, '');
+// Sans adresse ni jeton, rien ne part ; seule la barre d'état continue d'afficher ce qu'elle afficherait.
+if ((!url || !token) && !process.argv.includes('statusline')) process.exit(0);
+const base = (url ?? '').replace(/\/+$/, '');
 
 // La durée d'un outil : PreToolUse note l'heure dans un fichier, PostToolUse la relit.
 const clockDir = join(tmpdir(), 'agent-manager-tools');
@@ -590,6 +591,64 @@ if (copyAt > 1) {
     }
     writeFileSync(sentFile, JSON.stringify(sent));
   } catch {}
+  process.exit(0);
+}
+
+// L'envoi d'un relevé de la batterie Claude, lancé détaché par la barre d'état : elle n'attend pas le réseau.
+const quotaAt = process.argv.indexOf('quota');
+if (quotaAt > 1) {
+  try {
+    await fetch(base + '/api/ingest/quota', {
+      method: 'POST',
+      headers: {'content-type': 'application/json', authorization: 'Bearer ' + token},
+      body: process.argv[quotaAt + 1],
+      signal: AbortSignal.timeout(10_000)
+    });
+  } catch {}
+  process.exit(0);
+}
+
+// La barre d'état de Claude Code (lot 2026-10-31-batterie-claude) : Claude Code y passe les limites de l'abonnement
+// (`rate_limits` : la part utilisée de la fenêtre de cinq heures et de la semaine, l'heure de recharge). Le script les
+// affiche en une ligne et les envoie, au plus une fois par demi-minute quand elles bougent, sinon toutes les dix minutes.
+if (process.argv.includes('statusline')) {
+  let input = '';
+  for await (const chunk of process.stdin) input += chunk;
+  let data = null;
+  try { data = JSON.parse(input); } catch {}
+  const lines = [];
+  // Une barre d'état déjà en place continue de s'afficher : AGENT_MANAGER_STATUSLINE est sa commande, lancée avec la même entrée.
+  const before = process.env.AGENT_MANAGER_STATUSLINE;
+  if (before) {
+    try {
+      const shown = execSync(before, {input, encoding: 'utf8', timeout: 3000, stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true}).trimEnd();
+      if (shown) lines.push(shown);
+    } catch {}
+  }
+  const limits = data && typeof data.rate_limits === 'object' && data.rate_limits ? data.rate_limits : null;
+  const five = limits && typeof limits.five_hour?.used_percentage === 'number' && typeof limits.five_hour?.resets_at === 'number' ? limits.five_hour : null;
+  const week = limits && typeof limits.seven_day?.used_percentage === 'number' && typeof limits.seven_day?.resets_at === 'number' ? limits.seven_day : null;
+  const left = (window) => Math.max(0, Math.round(100 - window.used_percentage)) + ' %';
+  const hour = (window) => new Date(window.resets_at * 1000).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit', hourCycle: 'h23'});
+  const parts = [];
+  if (five) parts.push('Batterie 5 h ' + left(five) + ' (recharge ' + hour(five) + ')');
+  if (week) parts.push('semaine ' + left(week));
+  if (parts.length) lines.push(parts.join(' · '));
+  if (lines.length) process.stdout.write(lines.join('\n') + '\n');
+  if (url && token && (five || week)) {
+    try {
+      const stateFile = join(tmpdir(), 'agent-manager-quota.json');
+      const signature = JSON.stringify([five?.used_percentage ?? null, five?.resets_at ?? null, week?.used_percentage ?? null, week?.resets_at ?? null]);
+      let last = null;
+      try { last = JSON.parse(readFileSync(stateFile, 'utf8')); } catch {}
+      const since = Date.now() - (Number(last?.at) || 0);
+      if (last?.signature !== signature ? since > 30_000 : since > 600_000) {
+        writeFileSync(stateFile, JSON.stringify({signature, at: Date.now()}));
+        const body = JSON.stringify({rate_limits: {five_hour: five ?? undefined, seven_day: week ?? undefined}, session_id: data?.session_id, host: hostname(), hook_version: VERSION});
+        spawn(process.execPath, [fileURLToPath(import.meta.url), 'quota', body], {detached: true, stdio: 'ignore', env: process.env, windowsHide: true}).unref();
+      }
+    } catch {}
+  }
   process.exit(0);
 }
 
