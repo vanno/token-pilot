@@ -6,7 +6,7 @@ import {homedir, hostname, tmpdir} from 'node:os';
 import {join, resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
 
-const VERSION = '0e9de6098587';
+const VERSION = '6148c8021052';
 const url = process.env.AGENT_MANAGER_URL;
 const token = process.env.AGENT_MANAGER_TOKEN;
 // Sans adresse ni jeton, rien ne part ; seule la barre d'état continue d'afficher ce qu'elle afficherait.
@@ -480,6 +480,23 @@ async function selfUpdate(latest) {
   } catch {}
 }
 
+// Le délai que Claude Code laisse à ce hook avant un outil, en secondes, lu dans les réglages qui le déclarent (60 par défaut).
+function preToolBudget() {
+  let budget = 0;
+  const files = [join(homedir(), '.claude', 'settings.json')];
+  if (process.env.CLAUDE_PROJECT_DIR) files.push(join(process.env.CLAUDE_PROJECT_DIR, '.claude', 'settings.json'));
+  for (const file of files) {
+    try {
+      for (const entry of JSON.parse(readFileSync(file, 'utf8'))?.hooks?.PreToolUse ?? []) {
+        for (const hook of entry?.hooks ?? []) {
+          if (String(hook?.command ?? '').includes('agent-manager')) budget = Math.max(budget, Number(hook.timeout) || 60);
+        }
+      }
+    } catch {}
+  }
+  return budget || 60;
+}
+
 function answer(output) {
   process.stdout.write(JSON.stringify(output));
 }
@@ -679,7 +696,29 @@ try {
       if (event.tool_name === 'AskUserQuestion') {
         delete event.transcript_path;
         delete event.agent_transcript_path;
-        await call('/api/ingest', event, 2000);
+        // Un fil de projet n'aura pas de PermissionRequest : l'application y ouvre la validation à distance, et l'on attend
+        // ici la réponse du cockpit ou de l'e-mail, sans dépasser le délai de ce hook ; sans réponse, la carte s'affiche
+        // dans le fil (lot 2026-10-31-repondre-au-fil).
+        const project = process.env.CLAUDE_CODE_PROJECTS_SESSION === '1';
+        if (project) event.origin = 'project';
+        const reply = await call('/api/ingest', event, project ? 4000 : 2000);
+        const approval = reply?.control?.approval;
+        if (project && approval) {
+          const deadline = Date.now() + Math.min(Number(reply.control.wait) || 0, preToolBudget() - 8) * 1000;
+          while (Date.now() < deadline) {
+            await new Promise((resolve) => setTimeout(resolve, 2000));
+            const state = await call('/api/control/approvals/' + encodeURIComponent(approval), undefined, 3000);
+            if (state?.state === 'allow' && state.answers && typeof state.answers === 'object') {
+              answer({hookSpecificOutput: {hookEventName: 'PreToolUse', permissionDecision: 'allow', permissionDecisionReason: 'Répondu depuis Agent Manager.', updatedInput: {...event.tool_input, answers: state.answers}}});
+              break;
+            }
+            if (state?.state === 'deny') {
+              answer({hookSpecificOutput: {hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: 'Refusé depuis Agent Manager' + (state.message ? ' : ' + state.message : '.')}});
+              break;
+            }
+            if (state?.state === 'expired' || state?.state === 'allow') break;
+          }
+        }
       }
       process.exit(0);
     }
